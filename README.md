@@ -1,6 +1,9 @@
-# Auto Organizer
+<span align="center">
 
+# Auto Organizer
 A tool for automatically organizing files based on naming patterns.
+
+</span>
 
 ## Features
 - Automatically move files between folders based on naming patterns
