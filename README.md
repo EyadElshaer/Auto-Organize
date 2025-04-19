@@ -64,7 +64,7 @@ Edit
 C:/Organized/
    └── English/
          └── hw/
-            └── Homework(hw).pdf
+            └── Homework.pdf
 ```
 Example 2: Advanced Naming Scheme
 Watched Folder: C:/Documents/
@@ -83,7 +83,7 @@ C:/Organized/
          └── hw/
                └── hw2/
                      └── hw3/
-                        └── Homework(hw)[hw2]-hw3-.pdf
+                        └── Homework.pdf
 ```
 With this setup, your files are automatically organized into nested folders, saving you time and effort!
 
