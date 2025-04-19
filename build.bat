@@ -1,6 +1,13 @@
 @echo off
 echo Building Auto Organizer...
 
+REM Try to close any running instances of Auto Organizer
+echo Closing any running instances of Auto Organizer...
+taskkill /F /IM "Auto Organizer.exe" /T > nul 2>&1
+
+REM Add a small delay to ensure processes are fully terminated
+timeout /t 2 /nobreak > nul
+
 REM Check if Python is installed
 where python >nul 2>nul
 if %ERRORLEVEL% neq 0 (
@@ -41,4 +48,4 @@ python build_exe.py
 
 echo Build complete!
 echo Executable location: dist/Auto Organizer.exe
-pause 
+pause

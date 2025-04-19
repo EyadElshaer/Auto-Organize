@@ -3,19 +3,20 @@
 
 block_cipher = None
 
-# Collect all icon files
-icon_files = []
-for icon in ['icon.ico', 'watch.png', 'settings.png', 'logs.png', 'info.png', 'update.png']:
-    if os.path.exists(icon):
-        icon_files.append((icon, '.'))
-
 a = Analysis(
     ['watcher_app.py'],
     pathex=[],
     binaries=[],
     datas=[
-        ('version.txt', '.'), 
-    ] + icon_files,
+        ('version.txt', '.'),
+        ('icon.ico', '.'),
+        ('watch.png', '.'),
+        ('settings.png', '.'),
+        ('logs.png', '.'),
+        ('info.png', '.'),
+        ('update.png', '.'),
+
+    ],
     hiddenimports=['win32com.client', 'winshell', 'urllib.request', 'json', 're', 'webbrowser', 'datetime'],
     hookspath=[],
     hooksconfig={},

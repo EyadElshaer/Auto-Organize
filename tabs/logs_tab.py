@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
     QDialog, QDateTimeEdit, QFormLayout, QDialogButtonBox, QFileDialog
 )
 from PyQt5.QtCore import Qt, QDateTime, pyqtSignal, QTimer
+
 # When running directly
 try:
     from tabs.base_tab import BaseTab
@@ -13,6 +14,45 @@ except ModuleNotFoundError:
 
 # Path for log storage
 LOGS_FILE = os.path.expanduser("~/.watcher_logs.json")
+
+class UndoRedoManager:
+    """Manages the undo/redo operations globally"""
+    def __init__(self):
+        self.undo_stack = []  # [(source, destination, entry), ...]
+        self.redo_stack = []
+        
+    def push_action(self, source, destination, log_entry):
+        """Add a new action to undo stack"""
+        self.undo_stack.append((source, destination, log_entry))
+        # Clear redo stack when new action is performed
+        self.redo_stack.clear()
+        
+    def can_undo(self):
+        return len(self.undo_stack) > 0
+        
+    def can_redo(self):
+        return len(self.redo_stack) > 0
+        
+    def undo(self):
+        """Undo the last action"""
+        if not self.can_undo():
+            return None
+        action = self.undo_stack.pop()
+        self.redo_stack.append(action)
+        return action
+        
+    def redo(self):
+        """Redo the last undone action"""
+        if not self.can_redo():
+            return None
+        action = self.redo_stack.pop()
+        self.undo_stack.append(action)
+        return action
+        
+    def clear(self):
+        """Clear all undo/redo history"""
+        self.undo_stack.clear()
+        self.redo_stack.clear()
 
 class LogEntry(QFrame):
     """A log entry widget with undo/redo functionality"""
@@ -30,6 +70,8 @@ class LogEntry(QFrame):
         self.timestamp = timestamp or QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
 
         layout = QHBoxLayout()
+        
+        # Message label
         self.message_label = QLabel(f"[{self.timestamp}] {message}")
         layout.addWidget(self.message_label)
         
@@ -38,27 +80,30 @@ class LogEntry(QFrame):
         self.update_file_status()
         layout.addWidget(self.status_label)
 
-        # Only show buttons if source and destination are provided
-        if source and destination:
+        # Only show undo/redo buttons for file transfers
+        if source and destination and not ("(Undo)" in message or "(Redo)" in message):
+            # Undo button
             self.undo_btn = QPushButton("Undo")
-            self.redo_btn = QPushButton("Redo")
+            self.undo_btn.setFixedWidth(60)
+            self.undo_btn.clicked.connect(self.handle_undo)
             layout.addWidget(self.undo_btn)
+
+            # Redo button (initially hidden)
+            self.redo_btn = QPushButton("Redo")
+            self.redo_btn.setFixedWidth(60)
+            self.redo_btn.clicked.connect(self.handle_redo)
+            self.redo_btn.hide()
             layout.addWidget(self.redo_btn)
 
-            # Initially, only show appropriate button
+            # Set initial button states
             if self.is_undone:
                 self.undo_btn.hide()
                 self.redo_btn.show()
-            else:
-                self.redo_btn.hide()
-                self.undo_btn.show()
 
-            self.undo_btn.clicked.connect(self.handle_undo)
-            self.redo_btn.clicked.connect(self.handle_redo)
-
+        layout.addStretch()  # Add stretch to keep buttons right-aligned
         self.setLayout(layout)
         self.setFrameShape(QFrame.StyledPanel)
-        
+
     def update_file_status(self):
         """Check and update the status of files in this log entry"""
         if not hasattr(self, 'status_label') or not self.status_label:
@@ -86,30 +131,47 @@ class LogEntry(QFrame):
                 self.status_label.setStyleSheet("color: red")
 
     def handle_undo(self):
-        # Get the directory where the file originally came from
-        original_dir = os.path.dirname(self.original_source)
-        current_filename = os.path.basename(self.current_location)
-        name, ext = os.path.splitext(current_filename)
-        
-        # Create the undo destination path in the original directory
-        undo_destination = os.path.join(original_dir, f"{name} (Undo){ext}")
-        
-        # Emit signal to move from current location back to original directory
-        self.undo_requested.emit(self.current_location, undo_destination)
-        self.current_location = undo_destination
-        self.is_undone = True
-        self.undo_btn.hide()
-        self.redo_btn.show()
+        """Handle undo button click"""
+        if not self.is_undone and os.path.exists(self.current_location):
+            # Move back to original directory but keep the filename
+            filename = os.path.basename(self.current_location)
+            original_dir = os.path.dirname(self.original_source)
+            undo_destination = os.path.join(original_dir, filename)
+            
+            # Emit signal to perform undo
+            self.undo_requested.emit(self.current_location, undo_destination)
+            # Update current location after successful undo
+            self.current_location = undo_destination
+            self.is_undone = True
+            
+            # Update button visibility
+            self.undo_btn.hide()
+            self.redo_btn.show()
+            
+            # Update status
+            self.update_file_status()
 
     def handle_redo(self):
+        """Handle redo button click"""
         if self.is_undone and os.path.exists(self.current_location):
-            # Move from current (undo) location back to original destination
-            self.redo_requested.emit(self.current_location, self.original_destination)
-            self.current_location = self.original_destination
-            self.is_undone = False
-            self.undo_btn.show()
-            self.redo_btn.hide()
+            # Move back to organized location but keep the filename
+            filename = os.path.basename(self.current_location)
+            destination_dir = os.path.dirname(self.original_destination)
+            redo_destination = os.path.join(destination_dir, filename)
             
+            # Emit signal to perform redo
+            self.redo_requested.emit(self.current_location, redo_destination)
+            # Update current location after successful redo
+            self.current_location = redo_destination
+            self.is_undone = False
+            
+            # Update button visibility
+            self.redo_btn.hide()
+            self.undo_btn.show()
+            
+            # Update status
+            self.update_file_status()
+
     def to_dict(self):
         """Convert log entry to a dictionary for serialization"""
         return {
@@ -167,6 +229,7 @@ class LogsTab(BaseTab):
         super().__init__(parent)
         self.parent_window = parent
         self.log_entries = []  # Store log entries for saving
+        self.undo_redo_manager = UndoRedoManager()
         self.init_ui()
         self.load_logs()
         
@@ -174,7 +237,7 @@ class LogsTab(BaseTab):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.check_all_file_status)
         self.status_timer.start(10000)  # Check every 10 seconds
-        
+
     def init_ui(self):
         """Initialize the UI components"""
         # Button row
@@ -194,6 +257,18 @@ class LogsTab(BaseTab):
         self.export_btn = QPushButton("Export Logs")
         self.export_btn.clicked.connect(self.export_logs)
         buttons_layout.addWidget(self.export_btn)
+
+        # Undo All button
+        self.undo_all_btn = QPushButton("Undo All")
+        self.undo_all_btn.clicked.connect(self.undo_all)
+        self.undo_all_btn.setEnabled(False)
+        buttons_layout.addWidget(self.undo_all_btn)
+
+        # Redo All button
+        self.redo_all_btn = QPushButton("Redo All")
+        self.redo_all_btn.clicked.connect(self.redo_all)
+        self.redo_all_btn.setEnabled(False)
+        buttons_layout.addWidget(self.redo_all_btn)
         
         self.main_layout.addLayout(buttons_layout)
 
@@ -205,21 +280,90 @@ class LogsTab(BaseTab):
         self.logs_container_layout.setAlignment(Qt.AlignTop)
         self.logs_container.setLayout(self.logs_container_layout)
         self.logs_area.setWidget(self.logs_container)
-
         self.main_layout.addWidget(self.logs_area)
+
+    def update_undo_redo_buttons(self):
+        """Update the state of undo/redo buttons"""
+        self.undo_all_btn.setEnabled(self.undo_redo_manager.can_undo())
+        self.redo_all_btn.setEnabled(self.undo_redo_manager.can_redo())
+
+    def undo_all(self):
+        """Undo all actions in the undo stack"""
+        while self.undo_redo_manager.can_undo():
+            source, destination, entry = self.undo_redo_manager.undo()
+            try:
+                if os.path.exists(source):
+                    # Move the file back to its original location
+                    shutil.move(source, destination)
+                    entry.current_location = destination
+                    entry.is_undone = True
+                    self.log(f"Moved back to original location: {os.path.basename(destination)} (Undo)", 
+                            destination, source)
+            except Exception as e:
+                self.log(f"Undo error: {str(e)} (Undo)")
         
-    def check_all_file_status(self):
-        """Check status of all files in log entries"""
-        for i in range(self.logs_container_layout.count()):
-            widget = self.logs_container_layout.itemAt(i).widget()
-            if isinstance(widget, LogEntry):
-                widget.update_file_status()
+        self.update_undo_redo_buttons()
+        self.check_all_file_status()
+
+    def redo_all(self):
+        """Redo all undone actions"""
+        while self.undo_redo_manager.can_redo():
+            source, destination, entry = self.undo_redo_manager.redo()
+            try:
+                if os.path.exists(source):
+                    # Move the file back to its destination
+                    shutil.move(source, destination)
+                    entry.current_location = destination
+                    entry.is_undone = False
+                    self.log(f"Restored to: {os.path.dirname(destination)} (Redo)", 
+                            source, destination)
+            except Exception as e:
+                self.log(f"Redo error: {str(e)} (Redo)")
         
+        self.update_undo_redo_buttons()
+        self.check_all_file_status()
+
+    def log(self, message, source=None, destination=None):
+        """Add a new log entry"""
+        timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+        
+        if source is not None and destination is not None:
+            # Check if this is an original move message
+            is_original_move = not ("Moved back" in message or "(Undo)" in message or "(Redo)" in message)
+            
+            # Create log entry
+            log_entry = LogEntry(message, source, destination, timestamp)
+            
+            # Connect undo/redo signals
+            log_entry.undo_requested.connect(self.handle_undo)
+            log_entry.redo_requested.connect(self.handle_redo)
+            
+            if is_original_move:
+                # Add to undo stack for original moves
+                self.undo_redo_manager.push_action(destination, source, log_entry)
+                self.update_undo_redo_buttons()
+            
+            self.log_entries.append(log_entry.to_dict())
+            self.logs_container_layout.addWidget(log_entry)
+        else:
+            # Create simple log entry for messages without source/destination
+            log_entry = LogEntry(message, timestamp=timestamp)
+            self.log_entries.append(log_entry.to_dict())
+            self.logs_container_layout.addWidget(log_entry)
+            
+        # Auto-scroll to bottom
+        self.logs_area.verticalScrollBar().setValue(
+            self.logs_area.verticalScrollBar().maximum()
+        )
+        
+        # Save logs after each new entry
+        self.save_logs()
+
     def clear_logs(self):
         """Clear all log entries"""
         confirm = QMessageBox.question(
             self, "Clear Logs", 
-            "Are you sure you want to clear all logs? This cannot be undone.",
+            "Are you sure you want to clear all logs? This will also clear the undo/redo history.",
             QMessageBox.Yes | QMessageBox.No, 
             QMessageBox.No
         )
@@ -230,42 +374,31 @@ class LogsTab(BaseTab):
                 if widget:
                     widget.setParent(None)
             self.log_entries = []
+            self.undo_redo_manager.clear()
+            self.update_undo_redo_buttons()
             self.save_logs()
-                
-    def log(self, message, source=None, destination=None):
-        """Add a new log entry"""
-        timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+
+    def check_all_file_status(self):
+        """Check status of all files in log entries"""
+        for i in range(self.logs_container_layout.count()):
+            widget = self.logs_container_layout.itemAt(i).widget()
+            if isinstance(widget, LogEntry):
+                widget.update_file_status()
         
-        if source is not None and destination is not None:
-            # Check if this is an original move message or a moved back message
-            is_original_move = not ("Moved back" in message or "(Undo)" in message or "(Redo)" in message)
-            
-            if is_original_move:
-                # Create log entry with buttons for original moves
-                log_entry = LogEntry(message, source, destination, timestamp)
-                log_entry.undo_requested.connect(self.handle_undo)
-                log_entry.redo_requested.connect(self.handle_redo)
-                self.log_entries.append(log_entry.to_dict())
-            else:
-                # Create simple log entry without buttons for undo/redo operations
-                log_entry = LogEntry(message, source, destination, timestamp)
-                self.log_entries.append(log_entry.to_dict())
-        else:
-            # Create simple log entry for messages without source/destination
-            log_entry = LogEntry(message, None, None, timestamp)
-            self.log_entries.append(log_entry.to_dict())
-            
-        self.logs_container_layout.addWidget(log_entry)
-        self.save_logs()
-            
     def handle_undo(self, source, destination):
         """Handle undo request from log entry"""
         try:
             if os.path.exists(source):
-                # Move the file back to original directory with (Undo) suffix
+                # Ensure the destination directory exists
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                
+                # Move the file back to original location
                 shutil.move(source, destination)
                 self.log(f"Moved back to original location: {os.path.basename(destination)} (Undo)", 
-                        destination, source)  # Swap source and destination for next operation
+                        destination, source)
+                
+                # Update all file statuses
+                self.check_all_file_status()
             else:
                 self.log(f"Undo failed: File not found at {source} (Undo)")
         except Exception as e:
@@ -275,10 +408,16 @@ class LogsTab(BaseTab):
         """Handle redo request from log entry"""
         try:
             if os.path.exists(source):
+                # Ensure the destination directory exists
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                
                 # Move from undo location back to original destination
                 shutil.move(source, destination)
-                self.log(f"Moved back to: {os.path.dirname(destination)} (Redo)", 
+                self.log(f"Restored to: {os.path.dirname(destination)} (Redo)", 
                         source, destination)
+                
+                # Update all file statuses
+                self.check_all_file_status()
             else:
                 self.log(f"Redo failed: File not found at {source} (Redo)")
         except Exception as e:
@@ -392,4 +531,4 @@ class LogsTab(BaseTab):
                 self, 
                 "Export Error", 
                 f"Failed to export logs: {str(e)}"
-            ) 
+            )

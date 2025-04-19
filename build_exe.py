@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import subprocess
+import time
 
 print("Starting build process for Auto Organizer...")
 
@@ -31,11 +32,34 @@ if not os.path.exists('version.txt'):
         f.write('v1.0.0')
     print("Created version.txt file with default version v1.0.0")
 
+# Function to safely remove a directory with retries
+def safe_remove_directory(directory, max_retries=3, delay=1):
+    if not os.path.exists(directory):
+        return True
+        
+    for attempt in range(max_retries):
+        try:
+            print(f"Attempting to remove {directory} (attempt {attempt + 1}/{max_retries})...")
+            shutil.rmtree(directory, ignore_errors=True)
+            if not os.path.exists(directory):
+                return True
+        except Exception as e:
+            print(f"Failed to remove {directory}: {str(e)}")
+        
+        # Wait before retrying
+        if attempt < max_retries - 1:
+            print(f"Waiting {delay} seconds before retrying...")
+            time.sleep(delay)
+            
+    return False
+
 # Clean previous build folders if they exist
 for folder in ['build', 'dist']:
     if os.path.exists(folder):
         print(f"Cleaning {folder} directory...")
-        shutil.rmtree(folder)
+        if not safe_remove_directory(folder):
+            print(f"Warning: Could not completely remove {folder} directory.")
+            print("Continuing with build process anyway...")
 
 # List all icon files that exist
 icon_files_datas = ""
@@ -151,4 +175,4 @@ with open('README.md', 'w') as readme_file:
 print("Created README.md file")
 
 print("Build process completed successfully!")
-input("Press Enter to exit...") 
+input("Press Enter to exit...")
