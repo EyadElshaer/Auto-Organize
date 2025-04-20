@@ -10,7 +10,11 @@ A tool for automatically organizing files based on naming patterns.
 - Export logs
 
 ## Installation
-Simply download and run the executable. No installation required.
+Simply download and run the Installer.
+
+> **Note:** Windows Defender may flag this application as a potential threat or unwanted software because it has permission to read and move files. However, rest assured that **Auto Organizer** is safe and does not contain any viruses or harmful components.
+
+> To prevent this warning, you can either temporarily disable Windows Defender or add Auto Organizer to the **exclusion list** in Windows Security settings.
 
 ## Usage
 1. Open the application
@@ -86,10 +90,6 @@ C:/Organized/
                         └── Homework.pdf
 ```
 With this setup, your files are automatically organized into nested folders, saving you time and effort!
-
-> **Note:** Windows Defender may flag this application as a potential threat or unwanted software because it has permission to read and move files. However, rest assured that **Auto Organizer** is safe and does not contain any viruses or harmful components.
-
-> To prevent this warning, you can either temporarily disable Windows Defender or add Auto Organizer to the **exclusion list** in Windows Security settings.
 
 ## Support
 For issues or feature requests, please visit:
