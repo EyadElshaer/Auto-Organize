@@ -16,35 +16,34 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-REM Ensure PyInstaller is installed
+REM Ensure required packages are installed
 python -m pip install PyInstaller PyQt5 pywin32 winshell
 
-REM Create PNG icons only if they don't exist
-echo Checking for necessary icon files...
-if not exist watch.png (
-    echo Creating watch.png...
-    copy icon.ico watch.png >nul 2>nul
+REM Clean up previous build artifacts
+echo Cleaning up previous builds...
+if exist "build" rd /s /q "build"
+if exist "dist" rd /s /q "dist"
+
+REM Ensure icons directory exists and all required icons are present
+echo Checking icons...
+if not exist "icons" mkdir icons
+if not exist "icons\icon.ico" (
+    echo Error: icons\icon.ico not found!
+    pause
+    exit /b 1
 )
-if not exist settings.png (
-    echo Creating settings.png...
-    copy icon.ico settings.png >nul 2>nul
-)
-if not exist logs.png (
-    echo Creating logs.png...
-    copy icon.ico logs.png >nul 2>nul
-)
-if not exist info.png (
-    echo Creating info.png...
-    copy icon.ico info.png >nul 2>nul
-)
-if not exist update.png (
-    echo Creating update.png...
-    copy icon.ico update.png >nul 2>nul
-)
+
+REM Create the spec file with proper icon paths
+echo Creating PyInstaller spec file...
+python -c "import PyInstaller.__main__; PyInstaller.__main__.run(['--name=Auto Organizer', '--onefile', '--windowed', '--icon=icons/icon.ico', '--add-data=icons;icons', '--add-data=version.txt;.', 'watcher_app.py'])"
+
+REM Run PowerShell script with admin rights
+powershell -Command "Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File \"%~dp0register_app.ps1\"'"
+timeout /t 5
 
 REM Build the application
 echo Building with PyInstaller...
-python build_exe.py
+python -m PyInstaller AutoOrganizer.spec --clean
 
 echo Build complete!
 echo Executable location: dist/Auto Organizer.exe

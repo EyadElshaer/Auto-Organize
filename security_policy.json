@@ -1,0 +1,146 @@
+{
+    "restricted_paths": [
+        "C:\\Windows",
+        "C:\\Program Files",
+        "C:\\Program Files (x86)",
+        "C:\\ProgramData",
+        "C:\\System Volume Information",
+        "%WINDIR%",
+        "%SYSTEM32%"
+    ],
+    "file_restrictions": {
+        "max_file_size_mb": 4096,
+        "blocked_extensions": []
+    },
+    "operation_limits": {
+        "max_concurrent_operations": 50,
+        "max_files_per_minute": 1000,
+        "max_total_size_per_minute_mb": 2048
+    },
+    "logging": {
+        "enabled": true,
+        "max_log_size_mb": 50,
+        "max_log_age_days": 30,
+        "log_level": "INFO"
+    },
+    "backup": {
+        "keep_original_on_error": true,
+        "create_undo_backup": true,
+        "max_undo_age_hours": 72
+    },
+    "permissions": {
+        "require_write_access": true,
+        "verify_path_ownership": true,
+        "allow_network_paths": true,
+        "allow_removable_drives": true
+    },
+    "applicationId": "AutoOrganizer.Application",
+    "publisherId": "CN=Eyad Elshaer",
+    "packageFamilyName": "AutoOrganizer_x64",
+    "windowsStore": {
+        "isRegistered": true,
+        "registrationType": "PackageIdentity",
+        "capabilities": [
+            "runFullTrust",
+            "broadFileSystemAccess",
+            "internetClient",
+            "documentsLibrary"
+        ]
+    },
+    "manifest": {
+        "version": "1.0.3.0",
+        "processorArchitecture": "x64",
+        "supportedWindowsVersions": [
+            "10.0.17763.0",
+            "10.0.22621.0"
+        ]
+    },
+    "registration": {
+        "appRegistration": true,
+        "storeRegistration": true,
+        "protocolHandler": "autoorganizer"
+    },
+    "applicationName": "Auto Organizer",
+    "publisher": "Eyad Elshaer",
+    "version": "1.0.3",
+    "requiredPermissions": {
+        "fileSystem": {
+            "allowedOperations": ["read", "write", "move", "watch"],
+            "restrictedPaths": [
+                "C:\\Windows",
+                "C:\\Program Files",
+                "C:\\Program Files (x86)",
+                "C:\\ProgramData",
+                "C:\\System Volume Information"
+            ],
+            "userSelectedDirectoriesOnly": true
+        },
+        "system": {
+            "autoStart": {
+                "enabled": true,
+                "registryKey": "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                "userOptIn": true
+            },
+            "systemTray": {
+                "enabled": true,
+                "notifications": true
+            }
+        },
+        "updates": {
+            "checkForUpdates": true,
+            "autoUpdate": false,
+            "updateSource": "https://github.com/EyadElshaer/Auto-Organize/releases"
+        }
+    },
+    "declaredCapabilities": {
+        "fileSystem": {
+            "watchDirectories": true,
+            "moveFiles": true,
+            "createDirectories": true
+        },
+        "registry": {
+            "readSettings": true,
+            "writeSettings": true,
+            "startupRegistration": true
+        },
+        "system": {
+            "backgroundExecution": true,
+            "systemTray": true,
+            "notifications": true
+        },
+        "network": {
+            "checkUpdates": true,
+            "downloadUpdates": true
+        }
+    },
+    "securityMeasures": {
+        "fileOperations": {
+            "preserveOriginalFiles": true,
+            "validateBeforeMove": true,
+            "undoSupport": true
+        },
+        "logging": {
+            "enabled": true,
+            "logFileLocation": "userAppData",
+            "maxLogSize": "10MB",
+            "rotation": true
+        }
+    },
+    "trustInfo": {
+        "security": {
+            "requestedPrivileges": {
+                "level": "asInvoker",
+                "uiAccess": false
+            }
+        },
+        "msix": {
+            "capabilities": [
+                "documentsLibrary",
+                "picturesLibrary",
+                "videosLibrary",
+                "musicLibrary",
+                "broadFileSystemAccess"
+            ]
+        }
+    }
+}

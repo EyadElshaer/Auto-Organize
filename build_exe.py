@@ -6,6 +6,42 @@ import time
 
 print("Starting build process for Auto Organizer...")
 
+def create_self_signed_cert():
+    """Create a self-signed certificate for code signing if it doesn't exist"""
+    try:
+        # Check if certificate exists
+        cert_name = "AutoOrganizerCert"
+        cert_path = os.path.expanduser(f"~/{cert_name}.pfx")
+        
+        if not os.path.exists(cert_path):
+            print("Creating self-signed certificate...")
+            # Create certificate using PowerShell
+            ps_command = f"""
+            $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=Auto Organizer" -TextExtension @("2.5.29.37={{text}}1.3.6.1.5.5.7.3.3") -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048 -NotAfter (Get-Date).AddYears(5) -CertStoreLocation "Cert:\\CurrentUser\\My"
+            $password = ConvertTo-SecureString -String "AutoOrganizer123!" -Force -AsPlainText
+            Export-PfxCertificate -Cert $cert -FilePath "{cert_path}" -Password $password
+            """
+            
+            with open("create_cert.ps1", "w") as f:
+                f.write(ps_command)
+                
+            # Run PowerShell script to create certificate
+            subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", "create_cert.ps1"], 
+                         capture_output=True)
+            
+            # Clean up
+            if os.path.exists("create_cert.ps1"):
+                os.remove("create_cert.ps1")
+                
+            print(f"Created self-signed certificate at: {cert_path}")
+        return cert_path
+    except Exception as e:
+        print(f"Failed to create certificate: {str(e)}")
+        return None
+
+# Create self-signed certificate
+cert_path = create_self_signed_cert()
+
 # Check for required modules and install if missing
 required_packages = ['PyQt5', 'pywin32', 'winshell', 'pyinstaller']
 for package in required_packages:
@@ -63,7 +99,7 @@ for folder in ['build', 'dist']:
 
 # List all icon files that exist
 icon_files_datas = ""
-icon_list = ['icon.ico', 'watch.png', 'settings.png', 'logs.png', 'info.png', 'update.png']
+icon_list = ['icon.ico', 'icons/watch.png', 'icons/settings.png', 'icons/logs.png', 'icons/info.png', 'icons/update.png']
 for icon in icon_list:
     if os.path.exists(icon):
         print(f"Found icon: {icon}")
@@ -117,7 +153,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',
+    icon='icons/icon.ico',
 )
 """ % icon_files_datas
 
@@ -139,6 +175,29 @@ except Exception as e:
     print(f"PyInstaller build failed: {str(e)}")
     input("Press Enter to exit...")
     sys.exit(1)
+
+# Sign the executable if certificate is available
+if cert_path and os.path.exists(cert_path):
+    exe_path = os.path.join("dist", "Auto Organizer.exe")
+    if os.path.exists(exe_path):
+        print("Signing the executable...")
+        try:
+            # Sign using signtool
+            sign_command = [
+                "signtool", "sign",
+                "/f", cert_path,
+                "/p", "AutoOrganizer123!",
+                "/tr", "http://timestamp.digicert.com",
+                "/td", "sha256",
+                "/fd", "sha256",
+                exe_path
+            ]
+            subprocess.run(sign_command, check=True)
+            print("Successfully signed the executable!")
+        except Exception as e:
+            print(f"Failed to sign executable: {str(e)}")
+    else:
+        print("Executable not found for signing")
 
 print("Build completed!")
 print("Executable location: dist/Auto Organizer.exe")

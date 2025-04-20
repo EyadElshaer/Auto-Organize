@@ -74,7 +74,7 @@ class AboutTab(BaseTab):
         self.update_btn = QPushButton("Check for Update")
         self.update_btn.clicked.connect(self.check_for_updates)
         try:
-            self.update_btn.setIcon(safe_icon("update.png"))
+            self.update_btn.setIcon(safe_icon("icons/update.png"))
         except:
             pass  # No icon available
         update_container.addStretch()
@@ -152,4 +152,4 @@ class AboutTab(BaseTab):
             # Use the main window as parent if available
             parent = self.parent() if hasattr(self, 'parent') and callable(self.parent) else self
             QMessageBox.warning(parent, "Error", f"Failed to check for updates:\n{str(e)}")
-            print(f"Update check error: {str(e)}") 
+            print(f"Update check error: {str(e)}")

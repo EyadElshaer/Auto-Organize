@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QIcon, QPalette, QColor
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal, QThread, QObject
 from queue import Queue
+import winreg
 import time
 
 # Add Python's site-packages to path
@@ -41,10 +42,14 @@ def get_resource_path(relative_path):
     try:
         # PyInstaller creates a temp folder and stores path in _MEIPASS
         base_path = sys._MEIPASS
+        print(f"Using PyInstaller base path: {base_path}")
     except Exception:
         base_path = os.path.abspath(".")
+        print(f"Using development base path: {base_path}")
     
-    return os.path.join(base_path, relative_path)
+    full_path = os.path.join(base_path, relative_path)
+    print(f"Loading resource from: {full_path}")
+    return full_path
 
 def safe_icon(icon_path):
     """Create a QIcon object with fallback to empty icon if file doesn't exist"""
@@ -52,18 +57,25 @@ def safe_icon(icon_path):
     if os.path.exists(path):
         print(f"Found icon: {path}")
         return QIcon(path)
+    
+    # Try looking in the icons subdirectory
+    icons_path = get_resource_path(os.path.join("icons", os.path.basename(icon_path)))
+    if os.path.exists(icons_path):
+        print(f"Found icon in icons directory: {icons_path}")
+        return QIcon(icons_path)
+        
     # If icon doesn't exist but icon.ico does, use that instead
-    ico_path = get_resource_path("icon.ico")
+    ico_path = get_resource_path("icons/icon.ico")
     if os.path.exists(ico_path):
         print(f"Using fallback icon: {ico_path} for {icon_path}")
         return QIcon(ico_path)
+        
     # Last resort - empty icon
     print(f"WARNING: No icon found for {icon_path}")
     return QIcon()
 
 def get_windows_system_theme():
     try:
-        import winreg
         reg = winreg.ConnectRegistry(None, winreg.HKEY_CURRENT_USER)
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
         key = winreg.OpenKey(reg, key_path)
@@ -73,84 +85,40 @@ def get_windows_system_theme():
         return "light"
 
 def is_valid_filename_format(filename):
-    """Check if filename follows the required format with strict tag ordering"""
+    """
+    Validates if a filename follows the required format.
+    Format: prefix, rest_of_filename
+    The prefix will be used as the main folder name.
+    """
     try:
         # Skip files that have been undone
         if "(Undo)" in filename:
+            print(f"Skipping undo file: {filename}")
             return False
             
         # Basic comma check
         if ',' not in filename:
+            print(f"No comma found in filename: {filename}")
             return False
 
-        # Split by first comma and validate basic structure
+        # Split by first comma
         main_folder, name_part = filename.split(',', 1)
         
         # Validate main folder (before comma)
-        if not main_folder.strip():
+        main_folder = main_folder.strip()
+        if not main_folder:
+            print(f"Empty prefix before comma in filename: {filename}")
             return False
             
         # Validate name part (after comma)
         name_part = name_part.strip()
         if not name_part:
+            print(f"Empty name after comma in filename: {filename}")
             return False
 
-        # Get base name (part before any tags)
-        base_name = name_part.split('(')[0].split('[')[0].split('-')[0].strip()
-        if not base_name:
-            return False
-
-        # Check tag ordering
-        remainder = name_part[len(base_name):]
-        
-        # Now check tags in sequence
-        has_parentheses = False
-        has_brackets = False
-        
-        # Track positions to ensure correct order
-        paren_pos = remainder.find('(')
-        bracket_pos = remainder.find('[')
-        dash_pos = remainder.find('-')
-        
-        # If we have brackets, we must have parentheses before them
-        if bracket_pos != -1:
-            if paren_pos == -1 or paren_pos > bracket_pos:
-                return False
-                
-        # If we have dashes, we must have brackets before them
-        if dash_pos != -1:
-            if bracket_pos == -1 or bracket_pos > dash_pos:
-                return False
-
-        # Validate tag content
-        if '(' in remainder:
-            # Check all parentheses pairs
-            paren_parts = re.findall(r'\(([^)]*)\)', remainder)
-            if any(not part.strip() for part in paren_parts):
-                return False
-            has_parentheses = True
-
-        if '[' in remainder:
-            # Must have parentheses before brackets
-            if not has_parentheses:
-                return False
-            # Check all bracket pairs
-            bracket_parts = re.findall(r'\[(.*?)\]', remainder)
-            if any(not part.strip() for part in bracket_parts):
-                return False
-            has_brackets = True
-
-        if '-' in remainder:
-            # Must have brackets before dashes
-            if not has_brackets:
-                return False
-            # Check all dash pairs
-            dash_parts = re.findall(r'-([^-]*)-', remainder)
-            if any(not part.strip() for part in dash_parts):
-                return False
-
+        # As long as we have a valid prefix and name, consider it valid
         return True
-        
+
     except Exception as e:
         print(f"Validation error for {filename}: {str(e)}")
         return False
@@ -383,21 +351,27 @@ if USE_WATCHDOG:
         """Watches for file system changes and processes files immediately"""
         
         def __init__(self, watch_dir, target_dir, file_queue, logging_signal):
+            super().__init__()  # Add super() call to properly initialize FileSystemEventHandler
             self.watch_dir = watch_dir
             self.target_dir = target_dir
             self.file_queue = file_queue
             self.logging_signal = logging_signal
             self.observer = Observer()
             self.observer.schedule(self, watch_dir, recursive=False)
+            self.processed_files = set()  # Track processed files to avoid duplicates
             
         def start(self):
             """Start watching the directory"""
-            self.observer.start()
+            if not self.observer.is_alive():
+                self.observer.start()
+                self.logging_signal.emit(f"Started watching {self.watch_dir}", None, None)
             
         def stop(self):
             """Stop watching the directory"""
-            self.observer.stop()
-            self.observer.join()
+            if self.observer.is_alive():
+                self.observer.stop()
+                self.observer.join()
+                self.logging_signal.emit(f"Stopped watching {self.watch_dir}", None, None)
             
         def on_created(self, event):
             """Handle file creation events"""
@@ -415,6 +389,7 @@ if USE_WATCHDOG:
             """Handle file move/rename events"""
             if event.is_directory:
                 return
+            # Process the destination path since that's where the file ended up
             self._process_file(event.dest_path)
             
         def _process_file(self, file_path):
@@ -423,26 +398,56 @@ if USE_WATCHDOG:
                 # Get just the filename
                 filename = os.path.basename(file_path)
                 
+                # Create a unique identifier for this file event
+                file_id = f"{filename}_{os.path.getmtime(file_path)}"
+                
+                # Skip if we've already processed this exact file event
+                if file_id in self.processed_files:
+                    return
+                    
                 # Skip system files and files without commas
                 if filename.startswith('.') or filename.startswith('$'):
+                    self.logging_signal.emit(f"Skipping system file: {filename}", None, None)
                     return
                     
                 if ',' not in filename:
+                    self.logging_signal.emit(f"Skipping file without comma: {filename}", None, None)
                     return
                     
                 # Basic validation before queueing
                 try:
                     prefix, remainder = filename.split(',', 1)
-                    if not prefix.strip() or not remainder.strip():
+                    prefix = prefix.strip()
+                    remainder = remainder.strip()
+                    if not prefix or not remainder:
+                        self.logging_signal.emit(f"Skipping file - invalid format (empty prefix or name): {filename}", None, None)
                         return
                 except:
+                    self.logging_signal.emit(f"Skipping file - error splitting filename: {filename}", None, None)
                     return
                     
+                # Add to processed files set to avoid duplicates
+                self.processed_files.add(file_id)
+                
+                # Limit the size of processed_files set
+                if len(self.processed_files) > 1000:
+                    self.processed_files.clear()
+                
                 # Queue the file for processing
-                self.file_queue.put((filename, file_path, self.watch_dir, self.target_dir, None))
+                if os.path.exists(file_path):  # Double check file still exists
+                    self.logging_signal.emit(f"Detected new file: {filename}", None, None)
+                    self.file_queue.put((filename, file_path, self.watch_dir, self.target_dir, None))
                 
             except Exception as e:
-                self.logging_signal.emit(f"Error processing new file {file_path}: {str(e)}", None, None)
+                self.logging_signal.emit(f"Error processing file {file_path}: {str(e)}", None, None)
+
+        def __del__(self):
+            """Ensure observer is stopped when the watcher is destroyed"""
+            try:
+                if hasattr(self, 'observer'):
+                    self.stop()
+            except:
+                pass
 
 class WatcherManager:
     """Manages file watching using either watchdog or polling"""
@@ -529,31 +534,32 @@ class WatcherApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Auto Organizer")
-        self.setWindowIcon(safe_icon("icon.ico"))
+        self.setWindowIcon(safe_icon("icons/icon.ico"))  # Updated path
         self.setGeometry(100, 100, 750, 500)
+        
+        # Register application with Windows
+        self.register_application()
         
         # Set proper window flags to show all buttons
         self.setWindowFlags(Qt.Window | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint)
-        
-        # Initialize tray menu actions first
-        self.enable_action = QAction("Enable Watching", self)
-        self.disable_action = QAction("Disable Watching", self)
-        self.open_action = QAction("Open", self)
-        self.exit_action = QAction("Exit", self)
-        
-        # Connect actions
-        self.enable_action.triggered.connect(self.enable_watching)
-        self.disable_action.triggered.connect(self.disable_watching)
-        self.open_action.triggered.connect(self.restore_window)
-        self.exit_action.triggered.connect(QApplication.quit)
 
-        # Initialize state variables and load config
+        # Initialize instance variables
+        self.tray = None
+        self.tray_menu = None
+        self.enable_action = None
+        self.disable_action = None
+        self.open_action = None
+        self.exit_action = None
         self.watching = False
-        self.load_config()
-
-        # Setup system tray BEFORE any other initialization that might use it
-        self.setup_tray()
         
+        # Load config first as other initializations may need it
+        self.load_config()
+        
+        # Initialize system tray immediately and ensure it's created
+        self.setup_tray()
+        if not self.tray or not self.tray.isSystemTrayAvailable():
+            print("Warning: System tray is not available")
+            
         # Initialize file processing queue and worker
         self.file_queue = Queue()
         self.worker_thread = QThread()
@@ -593,11 +599,48 @@ class WatcherApp(QMainWindow):
         
         # Auto-hide if configured
         if self.config.get("minimize_on_startup", False):
-            self.hide_to_tray()
+            QTimer.singleShot(0, self.hide_to_tray)
         
         # Start watching if start on launch is enabled
         if self.config.get("start_on_launch", False):
             QTimer.singleShot(1000, lambda: self.handle_start_on_launch(True))
+
+    def register_application(self):
+        """Register the application with Windows"""
+        try:
+            # Get the actual executable path
+            if getattr(sys, 'frozen', False):
+                exe_path = sys.executable
+            else:
+                exe_path = os.path.abspath(sys.argv[0])
+
+            # Register Application Capabilities
+            key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\AppRegistration\Applications\AutoOrganizer.Application"
+            try:
+                with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_ALL_ACCESS) as key:
+                    winreg.SetValueEx(key, "ExecutablePath", 0, winreg.REG_SZ, exe_path)
+                    winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Auto Organizer")
+                    winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, "Eyad Elshaer")
+                    winreg.SetValueEx(key, "Version", 0, winreg.REG_SZ, "1.0.3.0")
+                    winreg.SetValueEx(key, "InstallLocation", 0, winreg.REG_SZ, os.path.dirname(exe_path))
+            except Exception as e:
+                print(f"Failed to register application capabilities: {str(e)}")
+
+            # Register ProgID
+            progid_path = r"SOFTWARE\Classes\AutoOrganizer.Application.1"
+            try:
+                with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, progid_path, 0, winreg.KEY_ALL_ACCESS) as key:
+                    winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Auto Organizer")
+                    winreg.SetValueEx(key, "FriendlyTypeName", 0, winreg.REG_SZ, "Auto Organizer")
+                    
+                    # Register Application ID
+                    with winreg.CreateKeyEx(key, "CLSID", 0, winreg.KEY_ALL_ACCESS) as clsid_key:
+                        winreg.SetValueEx(clsid_key, "", 0, winreg.REG_SZ, "{F7A76D84-5448-4E79-8F1B-EC8768B9610D}")
+            except Exception as e:
+                print(f"Failed to register ProgID: {str(e)}")
+
+        except Exception as e:
+            print(f"Failed to register application: {str(e)}")
 
     def on_initial_scan_complete(self):
         """Handle completion of initial scan"""
@@ -608,55 +651,85 @@ class WatcherApp(QMainWindow):
 
     def setup_tray(self):
         """Setup the system tray icon and menu"""
-        # Check if system tray is supported
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            print("System tray is not available on this system")
-            return
-            
-        # Use safe_icon for tray icon
-        self.tray = QSystemTrayIcon(safe_icon("icon.ico"), self)
-        self.tray.setToolTip("Auto Organizer")
-        
-        # Create tray menu
-        self.tray_menu = QMenu()
-        
-        # Add enable/disable actions
-        self.tray_menu.addAction(self.enable_action)
-        self.tray_menu.addAction(self.disable_action)
-        
-        # Add other actions
-        self.tray_menu.addSeparator()
-        self.tray_menu.addAction(self.open_action)
-        self.tray_menu.addAction(self.exit_action)
-        
-        # Set initial state
-        self.update_tray_menu()
-        
-        # Set the context menu
-        self.tray.setContextMenu(self.tray_menu)
-        
-        # Activate the tray icon
-        self.tray.show()
-        
-        # Connect activation signal to handle tray icon clicks
-        self.tray.activated.connect(self.tray_activated)
-        
-        # Check if the tray icon is visible
-        if not self.tray.isVisible():
-            print("Tray icon may not be visible - trying to show again")
+        try:
+            # Check if system tray is supported
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                print("System tray is not available on this system")
+                return False
+
+            # Create tray icon if it doesn't exist
+            if self.tray is None:
+                self.tray = QSystemTrayIcon(self)
+                
+            # Set the icon
+            icon = safe_icon("icons/icon.ico")
+            self.tray.setIcon(icon)
+            self.tray.setToolTip("Auto Organizer")
+
+            # Create actions if they don't exist
+            if self.enable_action is None:
+                self.enable_action = QAction("Enable Watching", self)
+                self.enable_action.triggered.connect(self.enable_watching)
+
+            if self.disable_action is None:
+                self.disable_action = QAction("Disable Watching", self)
+                self.disable_action.triggered.connect(self.disable_watching)
+
+            if self.open_action is None:
+                self.open_action = QAction("Open", self)
+                self.open_action.triggered.connect(self.restore_window)
+
+            if self.exit_action is None:
+                self.exit_action = QAction("Exit", self)
+                self.exit_action.triggered.connect(QApplication.quit)
+
+            # Create and set up menu
+            self.tray_menu = QMenu()
+            self.tray_menu.addAction(self.enable_action)
+            self.tray_menu.addAction(self.disable_action)
+            self.tray_menu.addSeparator()
+            self.tray_menu.addAction(self.open_action)
+            self.tray_menu.addAction(self.exit_action)
+
+            # Set initial state
+            self.update_tray_menu()
+
+            # Set the context menu
+            self.tray.setContextMenu(self.tray_menu)
+
+            # Connect activation signal
+            self.tray.activated.connect(self.tray_activated)
+
+            # Show the tray icon
             self.tray.show()
-        
+            
+            return True
+
+        except Exception as e:
+            print(f"Error setting up system tray: {str(e)}")
+            return False
+
     def update_tray_menu(self):
         """Update the tray menu based on watching state"""
-        if self.watching:
-            self.enable_action.setVisible(False)
-            self.disable_action.setVisible(True)
-            self.tray.setToolTip("Auto Organizer (Watching)")
-        else:
-            self.enable_action.setVisible(True)
-            self.disable_action.setVisible(False)
-            self.tray.setToolTip("Auto Organizer (Stopped)")
-            
+        try:
+            if self.tray is None or not self.tray.isSystemTrayAvailable():
+                return
+                
+            if self.watching:
+                if self.enable_action:
+                    self.enable_action.setVisible(False)
+                if self.disable_action:
+                    self.disable_action.setVisible(True)
+                self.tray.setToolTip("Auto Organizer (Watching)")
+            else:
+                if self.enable_action:
+                    self.enable_action.setVisible(True)
+                if self.disable_action:
+                    self.disable_action.setVisible(False)
+                self.tray.setToolTip("Auto Organizer (Stopped)")
+        except Exception as e:
+            print(f"Error updating tray menu: {str(e)}")
+
     def enable_watching(self):
         """Enable watching from tray menu"""
         pairs = self.main_tab.get_watch_pairs()
@@ -742,7 +815,6 @@ class WatcherApp(QMainWindow):
         if current_version != self.config.get("version", "v0.0.0"):
             self.config["version"] = current_version
             self.refresh_version()
-
     def init_tabs(self):
         """Initialize all application tabs"""
         from PyQt5.QtWidgets import QTabWidget
@@ -756,7 +828,7 @@ class WatcherApp(QMainWindow):
         self.main_tab.save_btn.clicked.connect(self.save_settings)
         self.main_tab.load_settings(self.config)
         # Use safe_icon for tab icons
-        self.tabs.addTab(self.main_tab, safe_icon("watch.png"), "Watchers")
+        self.tabs.addTab(self.main_tab, safe_icon("icons/watch.png"), "Watchers")
         
         # Settings tab - explicitly pass self as parent
         self.settings_tab = SettingsTab(self)
@@ -765,16 +837,16 @@ class WatcherApp(QMainWindow):
         self.settings_tab.theme_changed.connect(self.apply_theme)
         self.settings_tab.start_on_launch_changed.connect(self.handle_start_on_launch)
         self.settings_tab.load_settings(self.config)
-        self.tabs.addTab(self.settings_tab, safe_icon("settings.png"), "Settings")
+        self.tabs.addTab(self.settings_tab, safe_icon("icons/settings.png"), "Settings")
         
         # Logs tab - explicitly pass self as parent
         self.logs_tab = LogsTab(self)
-        self.tabs.addTab(self.logs_tab, safe_icon("logs.png"), "Logs")
+        self.tabs.addTab(self.logs_tab, safe_icon("icons/logs.png"), "Logs")
         
         # About tab - explicitly pass self as parent
         self.about_tab = AboutTab(self, VERSION_FILE)
         self.about_tab.update_auto_update_status(self.config.get("auto_update_check", True))
-        self.tabs.addTab(self.about_tab, safe_icon("info.png"), "About")
+        self.tabs.addTab(self.about_tab, safe_icon("icons/info.png"), "About")
 
     def apply_theme(self, theme):
         theme = theme.lower()
@@ -787,23 +859,7 @@ class WatcherApp(QMainWindow):
             else:
                 theme = "light"
 
-        if theme == "windows xp":
-            app.setStyle("WindowsXP")  # Set Windows XP style
-            # Classic Windows XP colors
-            palette.setColor(QPalette.Window, QColor(236, 233, 216))  # XP window color
-            palette.setColor(QPalette.WindowText, Qt.black)
-            palette.setColor(QPalette.Base, Qt.white)
-            palette.setColor(QPalette.AlternateBase, QColor(245, 245, 245))
-            palette.setColor(QPalette.ToolTipBase, QColor(236, 233, 216))
-            palette.setColor(QPalette.ToolTipText, Qt.black)
-            palette.setColor(QPalette.Text, Qt.black)
-            palette.setColor(QPalette.Button, QColor(236, 233, 216))
-            palette.setColor(QPalette.ButtonText, Qt.black)
-            palette.setColor(QPalette.BrightText, Qt.white)
-            palette.setColor(QPalette.Highlight, QColor(49, 106, 197))  # XP blue
-            palette.setColor(QPalette.HighlightedText, Qt.white)
-            palette.setColor(QPalette.Link, QColor(0, 0, 255))
-        elif theme == "dark":
+        if theme == "dark":
             app.setStyle("Fusion")
             # Dark gray instead of pure black
             dark_color = QColor(45, 45, 45)
@@ -843,7 +899,6 @@ class WatcherApp(QMainWindow):
 
     def handle_start_on_launch(self, enabled):
         """Handle the start on launch setting change"""
-        import winreg
         startup_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
         
         try:
@@ -1074,8 +1129,11 @@ class WatcherApp(QMainWindow):
 
     def show_notification(self, title, message, icon=QSystemTrayIcon.Information, duration=2000):
         """Show a system tray notification if enabled"""
-        if self.config.get("show_notifications", True):
-            self.tray.showMessage(title, message, icon, duration)
+        try:
+            if self.config.get("show_notifications", True) and self.tray and self.tray.isSystemTrayAvailable():
+                self.tray.showMessage(title, message, icon, duration)
+        except Exception as e:
+            print(f"Error showing notification: {str(e)}")
 
     def auto_check_for_updates(self):
         """Automatically check for updates if enabled"""
@@ -1153,7 +1211,31 @@ class WatcherApp(QMainWindow):
         self.logs_tab.log(message, src, dest)
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = WatcherApp()
-    window.show()
-    sys.exit(app.exec_())
+    try:
+        app = QApplication(sys.argv)
+        window = WatcherApp()
+        
+        # Only show the window if minimize_on_startup is False
+        if not window.config.get("minimize_on_startup", False):
+            window.show()
+            window.activateWindow()
+            window.raise_()
+        else:
+            window.hide_to_tray()
+            window.show_notification(
+                "Auto Organizer",
+                "Running in system tray",
+                QSystemTrayIcon.Information,
+                2000
+            )
+        
+        sys.exit(app.exec_())
+    except Exception as e:
+        # If there's an error, show it in a message box so the user can see what went wrong
+        error_box = QMessageBox()
+        error_box.setIcon(QMessageBox.Critical)
+        error_box.setWindowTitle("Error")
+        error_box.setText("An error occurred while starting the application:")
+        error_box.setDetailedText(str(e))
+        error_box.exec_()
+        sys.exit(1) 
