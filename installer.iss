@@ -29,17 +29,23 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 AppMutex=AutoOrganizerAppMutex_{#MyAppVersion}
 
+; Add minimum Windows version requirement
+MinVersion=10.0.17763
+
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "defenderexclusion"; Description: "Add Windows Defender exclusion (recommended)"; GroupDescription: "Security Settings"; Flags: checkedonce
+Name: "defenderexclusion"; Description: "Add Windows Defender exclusion (recommended for proper functionality)"; GroupDescription: "Security Settings"; Flags: checkedonce
 
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "icons\*"; DestDir: "{app}\icons"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "add_defender_exclusion.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "add_defender_exclusion.ps1"; DestDir: "{app}"; Flags: ignoreversion deleteafterinstall
+
+; Visual C++ Redistributable requirement check
+Source: "vcredist\VC_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -58,10 +64,42 @@ UpdateButton=Update
 InstallButton=Install
 
 [Run]
+; Install Visual C++ Redistributable if needed
+Filename: "{tmp}\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Visual C++ Redistributable..."; Check: VCRedistNeedsInstall; Flags: waituntilterminated
+
+; Add Windows Defender exclusion with proper elevation and feedback
+Filename: "powershell.exe"; \
+    Parameters: "-ExecutionPolicy Bypass -NoProfile -WindowStyle Normal -Command ""Start-Process powershell.exe -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \""{app}\add_defender_exclusion.ps1\"" \""{app}\{#MyAppExeName}\"" ' -Verb RunAs -Wait"""; \
+    StatusMsg: "Adding Windows Defender exclusion..."; \
+    Tasks: defenderexclusion; \
+    Flags: runascurrentuser shellexec waituntilterminated
+
+; Launch application after installation
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent runascurrentuser
-Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -File ""{app}\add_defender_exclusion.ps1"" ""{app}\{#MyAppExeName}"""; Flags: runhidden; Tasks: defenderexclusion; StatusMsg: "Adding Windows Defender exclusion..."
+
+[UninstallRun]
+Filename: "powershell.exe"; Parameters: "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -Command ""& {{try {{ Remove-MpPreference -ExclusionPath '{app}\{#MyAppExeName}' -ErrorAction SilentlyContinue }} catch {{}}}}"""; Flags: runhidden; RunOnceId: "RemoveDefenderExclusion"
 
 [Code]
+// Function to check if Visual C++ Redistributable needs to be installed
+function VCRedistNeedsInstall: Boolean;
+var
+  Version: String;
+  Install: Boolean;
+begin
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64', 'Version', Version) then
+  begin
+    // Check if the installed version is older than the required version
+    Install := (CompareStr(Version, '14.34.31938') < 0);
+  end
+  else
+  begin
+    // Visual C++ Redistributable is not installed
+    Install := True;
+  end;
+  Result := Install;
+end;
+
 var
   WarningText: TNewStaticText;
 
@@ -93,7 +131,7 @@ begin
     Width := WizardForm.TasksList.Width;
     Height := ScaleY(40);
     Caption := '⚠️ Warning: Without Windows Defender exclusion, the application might be detected as a threat and could be blocked during installation or execution.';
-    Font.Color := clRed;  // Changed to clRed for better compatibility
+    Font.Color := clRed;
     Font.Style := [fsBold];
     WordWrap := True;
     Visible := True;

@@ -3,6 +3,7 @@ import sys
 import shutil
 import subprocess
 import time
+from pathlib import Path
 
 print("Starting build process for Auto Organizer...")
 
@@ -42,24 +43,71 @@ def create_self_signed_cert():
 # Create self-signed certificate
 cert_path = create_self_signed_cert()
 
-# Check for required modules and install if missing
-required_packages = ['PyQt5', 'pywin32', 'winshell', 'pyinstaller']
-for package in required_packages:
-    print(f"Checking for {package}...")
+# Install required packages using pip
+def install_requirements():
+    # First, upgrade pip itself
     try:
-        __import__(package.lower().replace('-', '_'))
-        print(f"✓ {package} is installed")
-    except ImportError:
-        print(f"✗ {package} is not installed. Installing...")
-        try:
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
-            print(f"✓ {package} installed successfully")
-        except Exception as e:
-            print(f"✗ Failed to install {package}: {str(e)}")
-            input("Press Enter to exit...")
-            sys.exit(1)
+        print("Upgrading pip...")
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--upgrade', 'pip'])
+    except Exception as e:
+        print(f"Warning: Could not upgrade pip: {str(e)}")
 
-# Now import PyInstaller after ensuring it's installed
+    # Install packages in order of dependency
+    requirements = [
+        ('wheel', 'wheel'),  # Required for building some packages
+        ('setuptools', 'setuptools>=65.5.1'),  # Required for building some packages
+        ('PyQt5-sip', 'PyQt5-sip>=12.11'),  # Required by PyQt5
+        ('PyQt5', 'PyQt5>=5.15.9'),
+        ('pywin32', 'pywin32'),  # Let pip choose the best version
+        ('winshell', 'winshell>=0.6'),
+        ('watchdog', 'watchdog>=3.0.0'),
+        ('Pillow', 'Pillow>=10.2.0'),
+        ('pyinstaller-hooks-contrib', 'pyinstaller-hooks-contrib>=2024.0'),
+        ('pyinstaller', 'pyinstaller>=6.3.0')
+    ]
+    
+    print("\nInstalling required packages...")
+    for package_name, package_spec in requirements:
+        try:
+            print(f"\nInstalling {package_spec}...")
+            
+            # Try to uninstall first if it exists
+            try:
+                subprocess.check_call([sys.executable, '-m', 'pip', 'uninstall', package_name, '-y'])
+                print(f"Uninstalled existing {package_name}")
+            except:
+                pass  # Ignore if package wasn't installed
+                
+            # Install the package
+            install_cmd = [sys.executable, '-m', 'pip', 'install', 
+                         '--no-cache-dir', '--upgrade', package_spec]
+            
+            result = subprocess.run(install_cmd, 
+                                 capture_output=True, 
+                                 text=True)
+            
+            if result.returncode != 0:
+                print(f"Error output: {result.stderr}")
+                raise Exception(f"Installation failed with code {result.returncode}")
+                
+            print(f"✓ {package_spec} installed successfully")
+            
+        except Exception as e:
+            print(f"✗ Failed to install {package_spec}")
+            print(f"Error: {str(e)}")
+            print("\nDetailed error information:")
+            print("You can try installing this package manually using:")
+            print(f"pip install {package_spec}")
+            return False
+            
+    return True
+
+# Install requirements
+if not install_requirements():
+    input("Failed to install requirements. Press Enter to exit...")
+    sys.exit(1)
+
+# Import PyInstaller after ensuring it's installed
 import PyInstaller.__main__
 
 # Ensure version.txt exists
@@ -97,6 +145,33 @@ for folder in ['build', 'dist']:
             print(f"Warning: Could not completely remove {folder} directory.")
             print("Continuing with build process anyway...")
 
+# Create Windows Defender exclusion script
+def create_defender_exclusion_script():
+    script_content = """
+param([string]$AppPath)
+
+# Check if running as administrator
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Warning "This script requires administrator privileges."
+    exit 1
+}
+
+try {
+    # Add exclusion for the application
+    Add-MpPreference -ExclusionPath $AppPath -ErrorAction Stop
+    Write-Host "Successfully added Windows Defender exclusion for: $AppPath"
+} catch {
+    Write-Warning "Failed to add Windows Defender exclusion: $_"
+    exit 1
+}
+"""
+    
+    with open('add_defender_exclusion.ps1', 'w') as f:
+        f.write(script_content)
+    print("Created Windows Defender exclusion script")
+
 # List all icon files that exist
 icon_files_datas = ""
 icon_list = ['icon.ico', 'icons/watch.png', 'icons/settings.png', 'icons/logs.png', 'icons/info.png', 'icons/update.png']
@@ -107,7 +182,7 @@ for icon in icon_list:
     else:
         print(f"Icon not found: {icon}")
 
-# Create a spec file with explicit icon paths
+# Create a spec file with explicit icon paths and additional data files
 spec_content = """
 # -*- mode: python ; coding: utf-8 -*-
 
@@ -121,7 +196,17 @@ a = Analysis(
         ('version.txt', '.'),
 %s
     ],
-    hiddenimports=['win32com.client', 'winshell', 'urllib.request', 'json', 're', 'webbrowser', 'datetime'],
+    hiddenimports=[
+        'win32com.client',
+        'winshell',
+        'urllib.request',
+        'json',
+        're',
+        'webbrowser',
+        'datetime',
+        'watchdog.observers',
+        'watchdog.events'
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -131,6 +216,7 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
@@ -154,13 +240,52 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon='icons/icon.ico',
+    version='version_info.txt',
+    uac_admin=True
 )
 """ % icon_files_datas
 
+# Create version info file
+version_info = """
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        u'040904B0',
+        [StringStruct(u'CompanyName', u'Eyad Elshaer'),
+         StringStruct(u'FileDescription', u'Auto Organizer'),
+         StringStruct(u'FileVersion', u'1.0.0'),
+         StringStruct(u'InternalName', u'Auto Organizer'),
+         StringStruct(u'LegalCopyright', u'© 2024 Eyad Elshaer'),
+         StringStruct(u'OriginalFilename', u'Auto Organizer.exe'),
+         StringStruct(u'ProductName', u'Auto Organizer'),
+         StringStruct(u'ProductVersion', u'1.0.0')])
+    ]),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)
+"""
+
 with open('auto_organizer.spec', 'w') as spec_file:
     spec_file.write(spec_content)
-print("Created PyInstaller spec file with the following icons:")
-print(icon_files_datas)
+print("Created PyInstaller spec file")
+
+with open('version_info.txt', 'w') as ver_file:
+    ver_file.write(version_info)
+print("Created version info file")
+
+# Create Windows Defender exclusion script
+create_defender_exclusion_script()
 
 # Build executable with verbose output
 print("Building executable with PyInstaller...")
@@ -199,39 +324,60 @@ if cert_path and os.path.exists(cert_path):
     else:
         print("Executable not found for signing")
 
-print("Build completed!")
-print("Executable location: dist/Auto Organizer.exe")
+# Build the installer using Inno Setup
+print("\nBuilding installer with Inno Setup...")
+try:
+    # Check if Inno Setup is installed
+    iscc_path = None
+    possible_paths = [
+        r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+        r"C:\Program Files\Inno Setup 6\ISCC.exe"
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            iscc_path = path
+            break
+    
+    if iscc_path is None:
+        print("Inno Setup not found. Please install Inno Setup 6 from https://jrsoftware.org/isdl.php")
+        input("Press Enter to exit...")
+        sys.exit(1)
+    
+    # Run Inno Setup Compiler
+    subprocess.run([iscc_path, "installer.iss"], check=True)
+    print("Installer built successfully!")
+    
+    # Get the installer path
+    installer_path = os.path.abspath("AutoOrganizerSetup.exe")
+    
+    # Sign the installer if certificate is available
+    if cert_path and os.path.exists(cert_path):
+        print("Signing the installer...")
+        try:
+            sign_command = [
+                "signtool", "sign",
+                "/f", cert_path,
+                "/p", "AutoOrganizer123!",
+                "/tr", "http://timestamp.digicert.com",
+                "/td", "sha256",
+                "/fd", "sha256",
+                installer_path
+            ]
+            subprocess.run(sign_command, check=True)
+            print("Successfully signed the installer!")
+        except Exception as e:
+            print(f"Failed to sign installer: {str(e)}")
+    
+except Exception as e:
+    print(f"Failed to build installer: {str(e)}")
+    input("Press Enter to exit...")
+    sys.exit(1)
 
-# Create a basic README file with instructions
-readme_content = """# Auto Organizer
-
-A tool for automatically organizing files based on naming patterns.
-
-## Features
-- Automatically move files between folders based on naming patterns
-- Dark and light theme support
-- System tray integration
-- Persistent logs with undo/redo functionality
-- Export logs with date filtering
-
-## Installation
-Simply download and run the executable. No installation required.
-
-## Usage
-1. Open the application
-2. Add watch and target folder pairs
-3. Click Start to begin watching
-4. Files in the watch folders will be organized into subfolders in the target folders
-
-## Support
-For issues or feature requests, please visit:
-https://github.com/EyadElshaer/Auto-Organize
-
-"""
-
-with open('README.md', 'w') as readme_file:
-    readme_file.write(readme_content)
-print("Created README.md file")
-
-print("Build process completed successfully!")
+print("\nBuild process completed!")
+print(f"Installer location: {os.path.abspath('AutoOrganizerSetup.exe')}")
+print("\nTo distribute the application:")
+print("1. Share the AutoOrganizerSetup.exe file with users")
+print("2. Users can run the installer to install the application")
+print("3. The application can be uninstalled through Windows Settings")
 input("Press Enter to exit...")

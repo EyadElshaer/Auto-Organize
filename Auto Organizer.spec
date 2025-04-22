@@ -5,8 +5,8 @@ a = Analysis(
     ['watcher_app.py'],
     pathex=[],
     binaries=[],
-    datas=[('icons', 'icons'), ('version.txt', '.')],
-    hiddenimports=[],
+    datas=[('version.txt', '.'), ('icons/*', 'icons')],
+    hiddenimports=['win32com.client', 'winshell', 'urllib.request', 'json', 're', 'webbrowser', 'datetime', 'watchdog.observers', 'watchdog.events'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -35,5 +35,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version='version_info.txt',
+    uac_admin=True,
     icon=['icons\\icon.ico'],
 )

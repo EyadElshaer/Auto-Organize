@@ -1,31 +1,28 @@
-# This script adds the Auto Organizer executable to Windows Defender exclusions
-param (
-    [Parameter(Mandatory=$true)]
-    [string]$AppPath
-)
+# Get the path from command line argument
+param([string]$ExePath)
 
-# Check if running with administrator privileges
+# Check if running as administrator
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-if (-Not $isAdmin) {
-    Write-Error "This script must be run with administrator privileges."
+if (-not $isAdmin) {
+    Write-Host "This script requires administrator privileges."
     exit 1
 }
 
 try {
-    # Check if Windows Defender is running
-    $defenderService = Get-Service -Name WinDefend -ErrorAction SilentlyContinue
+    # Add the exclusion
+    Add-MpPreference -ExclusionPath $ExePath -ErrorAction Stop
     
-    if ($defenderService -and $defenderService.Status -eq "Running") {
-        # Add the application to exclusions
-        Add-MpPreference -ExclusionPath $AppPath -ErrorAction Stop
-        Write-Output "Successfully added $AppPath to Windows Defender exclusions."
+    # Verify the exclusion was added
+    $exclusions = Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+    if ($exclusions -contains $ExePath) {
+        Write-Host "Successfully added exclusion for: $ExePath"
         exit 0
     } else {
-        Write-Output "Windows Defender service is not running."
-        exit 2
+        Write-Host "Failed to verify exclusion was added."
+        exit 1
     }
 } catch {
-    Write-Error "Failed to add Windows Defender exclusion: $_"
+    Write-Host "Error adding exclusion: $_"
     exit 1
 }
