@@ -1,6 +1,6 @@
 # Auto Organizer Changelog
 
-## v1.0.4 - Functionality Fixes and Improvements
+## v2.0.2 - Functionality Fixes and Improvements
 
 ### Bug Fixes
 - Fixed issue where the application doesn't work on first start
