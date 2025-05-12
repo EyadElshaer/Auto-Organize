@@ -1,4 +1,8 @@
 # Auto Organizer Changelog
+## v2.0.3 - Functionality Fixes and Improvements
+
+### Bug Fixes
+- Fix when running the application while the application is already running gives you warning message
 
 ## v2.0.2 - Functionality Fixes and Improvements
 

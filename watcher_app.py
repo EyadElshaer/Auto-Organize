@@ -817,20 +817,28 @@ class WatcherApp(QMainWindow):
 
         # If we have an instance checker, connect its activation method
         if self.instance_checker:
-            # Monkey patch the instance checker's _activate_window method
-            original_activate = self.instance_checker._activate_window
+            try:
+                # Check if it's a DummyInstanceChecker (has a specific attribute)
+                if hasattr(self.instance_checker, 'app_name') and self.instance_checker.app_name == "AutoOrganizer_Dummy":
+                    print("Using dummy instance checker - skipping monkey patching")
+                else:
+                    # Monkey patch the instance checker's _activate_window method
+                    original_activate = self.instance_checker._activate_window
 
-            def new_activate_window():
-                try:
-                    # Emit our signal to activate the window from the main thread
-                    self.instance_activation_signal.emit()
-                    # Still call the original method for any cleanup it might do
-                    original_activate()
-                except Exception as e:
-                    print(f"Error in activate_window: {str(e)}")
+                    def new_activate_window():
+                        try:
+                            # Emit our signal to activate the window from the main thread
+                            self.instance_activation_signal.emit()
+                            # Still call the original method for any cleanup it might do
+                            original_activate()
+                        except Exception as e:
+                            print(f"Error in activate_window: {str(e)}")
 
-            # Replace the method
-            self.instance_checker._activate_window = new_activate_window
+                    # Replace the method
+                    self.instance_checker._activate_window = new_activate_window
+            except Exception as e:
+                print(f"Error setting up instance checker activation: {str(e)}")
+                # Continue without monkey patching
 
         # Register application with Windows
         self.register_application()
@@ -2275,14 +2283,85 @@ class SingleInstanceChecker:
     Ensures only one instance of the application is running.
     Uses a socket-based approach which works reliably on Windows 10 and Windows 11.
     Also provides functionality to activate the existing instance.
+    Enhanced with process verification to ensure the application is actually running.
     """
-    def __init__(self, app_name="AutoOrganizer"):
+    def __init__(self, app_name="AutoOrganizer", force_new=False):
         self.app_name = app_name
         self.socket = None
         self.lock_file = os.path.join(tempfile.gettempdir(), f"{app_name}.lock")
         self.port = self._get_port_from_app_name()
         self.server_thread = None
         self.running = True
+        self.process_name = "watcher_app.exe" if getattr(sys, 'frozen', False) else "python.exe"
+        self.mutex = None
+        self.mutex_owned = False
+        self.last_error = 0
+
+        # Create a Windows mutex to ensure only one instance runs
+        if platform.system() == 'Windows':
+            try:
+                import ctypes
+                self.kernel32 = ctypes.windll.kernel32
+                mutex_name = f"Global\\{app_name}_Mutex"
+                self.mutex_name = mutex_name
+
+                # If force_new is True, try to clean up any existing mutex first
+                if force_new:
+                    # Try to open and close the existing mutex to release it
+                    try:
+                        existing_mutex = self.kernel32.OpenMutexW(0x00100000, False, mutex_name)  # SYNCHRONIZE access
+                        if existing_mutex:
+                            self.kernel32.CloseHandle(existing_mutex)
+                            print(f"Closed existing mutex: {mutex_name}")
+                            # Wait a moment for the system to fully release it
+                            time.sleep(0.5)
+                    except Exception as e:
+                        print(f"Error closing existing mutex: {str(e)}")
+
+                # First try to open the mutex to see if it exists
+                existing_mutex = self.kernel32.OpenMutexW(0x00100000, False, mutex_name)  # SYNCHRONIZE access
+                if existing_mutex:
+                    # Mutex exists, check if it belongs to a running process
+                    print(f"Found existing mutex: {mutex_name}")
+                    self.kernel32.CloseHandle(existing_mutex)
+
+                    # Only consider it as another instance if we can verify a process is running
+                    if self._is_process_running():
+                        print("Verified another instance is running")
+                        # We'll create our mutex without taking ownership
+                        self.mutex = self.kernel32.CreateMutexW(None, False, mutex_name)
+                        self.last_error = ctypes.GetLastError()
+                        self.mutex_owned = False
+                    else:
+                        print("Found mutex but no process - mutex might be orphaned")
+                        # Try to create with ownership
+                        self.mutex = self.kernel32.CreateMutexW(None, True, mutex_name)
+                        self.last_error = ctypes.GetLastError()
+                        self.mutex_owned = True
+                        print(f"Created mutex {mutex_name} and took ownership")
+                else:
+                    # Mutex doesn't exist, create it with ownership
+                    self.mutex = self.kernel32.CreateMutexW(None, True, mutex_name)
+                    self.last_error = ctypes.GetLastError()
+                    self.mutex_owned = True
+                    print(f"Created new mutex {mutex_name} and took ownership")
+
+                # If we're forcing a new instance and couldn't get ownership, use a unique name
+                if force_new and self.mutex and not self.mutex_owned:
+                    self.kernel32.CloseHandle(self.mutex)
+                    self.mutex = None
+
+                    # Try to create a uniquely named mutex instead
+                    unique_mutex_name = f"Global\\{app_name}_Mutex_{os.getpid()}"
+                    self.mutex = self.kernel32.CreateMutexW(None, True, unique_mutex_name)
+                    self.last_error = ctypes.GetLastError()
+                    self.mutex_name = unique_mutex_name
+                    self.mutex_owned = True
+                    print(f"Created unique mutex: {unique_mutex_name}")
+            except Exception as e:
+                print(f"Error creating mutex: {str(e)}")
+                self.mutex = None
+                self.mutex_owned = False
 
     def _get_port_from_app_name(self):
         """Generate a port number from the app name (between 49152 and 65535)"""
@@ -2290,36 +2369,559 @@ class SingleInstanceChecker:
         port_hash = sum(ord(c) for c in self.app_name) % 16383
         return port_hash + 49152  # Use the private port range (49152-65535)
 
+    def _is_process_running(self):
+        """Check if the application process is actually running in the system"""
+        try:
+            # Use multiple methods to check for running instances
+            if platform.system() == 'Windows':
+                import subprocess
+
+                # Create startupinfo to hide console window
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
+
+                # Get our own PID and executable path
+                our_pid = os.getpid()
+                our_exe = sys.executable
+                our_script = os.path.abspath(sys.argv[0]) if not getattr(sys, 'frozen', False) else None
+
+                print(f"Our PID: {our_pid}, Executable: {our_exe}")
+                if our_script:
+                    print(f"Our script: {our_script}")
+
+                # Method 1: Check for our executable name
+                if getattr(sys, 'frozen', False):
+                    # We're running as a compiled executable
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"IMAGENAME eq {os.path.basename(our_exe)}", "/NH", "/FO", "CSV"],
+                        capture_output=True,
+                        text=True,
+                        startupinfo=startupinfo
+                    )
+
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines:
+                        if not line.strip():
+                            continue
+
+                        try:
+                            parts = line.strip('"').split('","')
+                            if len(parts) >= 2:
+                                process_name = parts[0]
+                                pid = int(parts[1])
+
+                                # If this is our process name but not our PID, it's another instance
+                                if pid != our_pid:
+                                    print(f"Found another instance by executable name: {process_name} (PID: {pid})")
+                                    return True
+                        except Exception as parse_error:
+                            print(f"Error parsing process line: {str(parse_error)}")
+
+                # Method 2: Check for Python processes running our script
+                if not getattr(sys, 'frozen', False):
+                    # We're running as a Python script
+                    result = subprocess.run(
+                        ["wmic", "process", "where", "name='python.exe' or name='pythonw.exe'", "get", "processid,commandline", "/format:csv"],
+                        capture_output=True,
+                        text=True,
+                        startupinfo=startupinfo
+                    )
+
+                    lines = result.stdout.strip().split('\n')
+                    script_name = os.path.basename(sys.argv[0])
+
+                    for line in lines:
+                        if not line.strip() or "CommandLine" in line:
+                            continue
+
+                        try:
+                            parts = line.split(',')
+                            if len(parts) >= 3:
+                                cmd_line = parts[1]
+                                pid = int(parts[2])
+
+                                # Skip our own process
+                                if pid == our_pid:
+                                    continue
+
+                                # If this command line contains our script name
+                                if script_name in cmd_line:
+                                    print(f"Found another Python instance running our script (PID: {pid})")
+                                    return True
+                        except Exception as parse_error:
+                            print(f"Error parsing Python process: {str(parse_error)}")
+
+                # Method 3: Check for window with our title
+                try:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+
+                    # Function to check if a window belongs to our process
+                    def is_our_window(hwnd):
+                        # Skip invisible windows
+                        if not user32.IsWindowVisible(hwnd):
+                            return False
+
+                        # Get window title
+                        length = user32.GetWindowTextLengthW(hwnd)
+                        if length == 0:
+                            return False
+
+                        buffer = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buffer, length + 1)
+                        title = buffer.value
+
+                        # Check if title matches our application
+                        if "Auto Organizer" in title:
+                            # Get process ID for this window
+                            pid = ctypes.c_ulong()
+                            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+                            # If it's not our PID, it's another instance
+                            if pid.value != our_pid:
+                                print(f"Found window with our title: '{title}' (PID: {pid.value})")
+                                return True
+
+                        return False
+
+                    # Enumerate all top-level windows
+                    windows = []
+
+                    def enum_windows_callback(hwnd, _):
+                        windows.append(hwnd)
+                        return True
+
+                    enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+                    enum_windows_proc_instance = enum_windows_proc(enum_windows_callback)
+                    user32.EnumWindows(enum_windows_proc_instance, 0)
+
+                    # Check each window
+                    for hwnd in windows:
+                        if is_our_window(hwnd):
+                            return True
+
+                except Exception as win_error:
+                    print(f"Error checking windows: {str(win_error)}")
+
+                # Method 4: Check for our mutex/named object
+                try:
+                    # Try to create a named mutex
+                    mutex_name = f"Global\\{self.app_name}_Mutex"
+
+                    # Open existing mutex without creating a new one
+                    kernel32 = ctypes.windll.kernel32
+                    mutex = kernel32.OpenMutexW(0x00100000, False, mutex_name)  # SYNCHRONIZE access right
+
+                    if mutex:
+                        # Mutex exists, another instance is running
+                        kernel32.CloseHandle(mutex)
+                        print(f"Found existing mutex: {mutex_name}")
+                        return True
+                except Exception as mutex_error:
+                    print(f"Error checking mutex: {str(mutex_error)}")
+
+                # Method 5: Check for our socket file
+                try:
+                    # Check if our lock file exists and contains a valid PID
+                    if os.path.exists(self.lock_file):
+                        try:
+                            with open(self.lock_file, 'r') as f:
+                                pid_str = f.read().strip()
+                                if pid_str and pid_str.isdigit():
+                                    pid = int(pid_str)
+                                    if pid != our_pid:
+                                        # Check if this PID is actually running
+                                        result = subprocess.run(
+                                            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                                            capture_output=True,
+                                            text=True,
+                                            startupinfo=startupinfo
+                                        )
+
+                                        if str(pid) in result.stdout:
+                                            print(f"Found process from lock file (PID: {pid})")
+                                            return True
+                        except Exception as file_error:
+                            print(f"Error reading lock file: {str(file_error)}")
+                except Exception as lock_error:
+                    print(f"Error checking lock file: {str(lock_error)}")
+
+                # If we get here, no other instance was found
+                return False
+            else:
+                # For non-Windows platforms, fall back to socket check
+                return True
+        except Exception as e:
+            print(f"Error checking process: {str(e)}")
+            # On error, assume no other process is running
+            return False
+
+    def terminate_existing_instance(self):
+        """Forcefully terminate any existing instance of the application"""
+        try:
+            if platform.system() == 'Windows':
+                import subprocess
+                import ctypes
+
+                # Create startupinfo to hide console window
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
+
+                # First try to find the PID of the other instance
+                our_pid = os.getpid()
+                other_pid = None
+
+                # Method 1: Check for our executable
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {self.process_name}", "/NH", "/FO", "CSV"],
+                    capture_output=True,
+                    text=True,
+                    startupinfo=startupinfo
+                )
+
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    if not line.strip():
+                        continue
+
+                    try:
+                        parts = line.strip('"').split('","')
+                        if len(parts) >= 2:
+                            process_name = parts[0]
+                            pid = int(parts[1])
+
+                            if process_name.lower() == self.process_name.lower() and pid != our_pid:
+                                other_pid = pid
+                                print(f"Found other instance by process name: {process_name} (PID: {pid})")
+                                break
+                    except Exception:
+                        continue
+
+                # Method 2: If we're running as a Python script, also check for Python processes
+                if not other_pid and self.process_name.lower() == "python.exe":
+                    result = subprocess.run(
+                        ["wmic", "process", "where", "name='python.exe' or name='pythonw.exe'", "get", "processid,commandline", "/format:csv"],
+                        capture_output=True,
+                        text=True,
+                        startupinfo=startupinfo
+                    )
+
+                    lines = result.stdout.strip().split('\n')
+                    script_name = os.path.basename(sys.argv[0])
+
+                    for line in lines:
+                        if not line.strip() or "CommandLine" in line:
+                            continue
+
+                        try:
+                            parts = line.split(',')
+                            if len(parts) >= 3:
+                                cmd_line = parts[1]
+                                pid = int(parts[2])
+
+                                if script_name in cmd_line and pid != our_pid:
+                                    other_pid = pid
+                                    print(f"Found other instance by script name: {script_name} (PID: {pid})")
+                                    break
+                        except Exception:
+                            continue
+
+                # Method 3: Check for window with our title
+                if not other_pid:
+                    try:
+                        user32 = ctypes.windll.user32
+
+                        # Function to find window by title and get its PID
+                        def find_window_pid(title_part):
+                            found_pid = None
+
+                            def enum_windows_callback(hwnd, _):
+                                nonlocal found_pid
+
+                                # Skip invisible windows
+                                if not user32.IsWindowVisible(hwnd):
+                                    return True
+
+                                # Get window title
+                                length = user32.GetWindowTextLengthW(hwnd)
+                                if length == 0:
+                                    return True
+
+                                buffer = ctypes.create_unicode_buffer(length + 1)
+                                user32.GetWindowTextW(hwnd, buffer, length + 1)
+                                title = buffer.value
+
+                                # Check if title contains our application name
+                                if title_part in title:
+                                    # Get process ID for this window
+                                    pid = ctypes.c_ulong()
+                                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+                                    # If it's not our PID, it's another instance
+                                    if pid.value != our_pid:
+                                        found_pid = pid.value
+                                        return False  # Stop enumeration
+
+                                return True  # Continue enumeration
+
+                            # Enumerate all windows
+                            enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+                            enum_windows_proc_instance = enum_windows_proc(enum_windows_callback)
+                            user32.EnumWindows(enum_windows_proc_instance, 0)
+
+                            return found_pid
+
+                        # Try to find window with our title
+                        other_pid = find_window_pid("Auto Organizer")
+                        if other_pid:
+                            print(f"Found other instance by window title (PID: {other_pid})")
+
+                    except Exception as win_error:
+                        print(f"Error finding window: {str(win_error)}")
+
+                # If we found another instance, terminate it
+                if other_pid:
+                    print(f"Terminating other instance with PID: {other_pid}")
+
+                    # Try to terminate gracefully first
+                    try:
+                        # Send WM_CLOSE message to all windows of this process
+                        def close_process_windows(pid):
+                            def enum_windows_callback(hwnd, _):
+                                # Get process ID for this window
+                                window_pid = ctypes.c_ulong()
+                                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
+
+                                # If window belongs to our target process
+                                if window_pid.value == pid:
+                                    # Send WM_CLOSE message (0x0010)
+                                    user32.PostMessageW(hwnd, 0x0010, 0, 0)
+
+                                return True
+
+                            # Enumerate all windows
+                            enum_windows_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+                            enum_windows_proc_instance = enum_windows_proc(enum_windows_callback)
+                            user32.EnumWindows(enum_windows_proc_instance, 0)
+
+                        # Try to close windows gracefully
+                        close_process_windows(other_pid)
+
+                        # Wait a moment for the process to exit
+                        time.sleep(1.0)
+
+                        # Check if process is still running
+                        result = subprocess.run(
+                            ["tasklist", "/FI", f"PID eq {other_pid}", "/NH"],
+                            capture_output=True,
+                            text=True,
+                            startupinfo=startupinfo
+                        )
+
+                        if str(other_pid) in result.stdout:
+                            # Process is still running, force terminate
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", str(other_pid)],
+                                startupinfo=startupinfo
+                            )
+
+                    except Exception as close_error:
+                        print(f"Error closing windows gracefully: {str(close_error)}")
+                        # Fall back to forceful termination
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", str(other_pid)],
+                            startupinfo=startupinfo
+                        )
+
+                    # Give it a moment to terminate
+                    time.sleep(1.0)
+
+                    # Verify process is terminated
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"PID eq {other_pid}", "/NH"],
+                        capture_output=True,
+                        text=True,
+                        startupinfo=startupinfo
+                    )
+
+                    if str(other_pid) not in result.stdout:
+                        print(f"Successfully terminated process with PID: {other_pid}")
+
+                        # Try to release any orphaned mutex
+                        try:
+                            # Just wait a moment for resources to be released
+                            time.sleep(0.5)
+                            print(f"Waiting for mutex resources to be released")
+                        except Exception as mutex_error:
+                            print(f"Error handling mutex after termination: {str(mutex_error)}")
+
+                        return True
+                    else:
+                        print(f"Failed to terminate process with PID: {other_pid}")
+                        return False
+
+                # If we couldn't find a specific PID, try terminating by image name
+                # This is a fallback and might terminate other instances of the same executable
+                print(f"No specific PID found, trying to terminate by image name: {self.process_name}")
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", self.process_name],
+                    startupinfo=startupinfo
+                )
+
+                # Give it a moment to terminate
+                time.sleep(1.0)
+
+                # Try to release any orphaned mutex
+                try:
+                    # Just wait a moment for resources to be released
+                    time.sleep(0.5)
+                    print(f"Waiting for mutex resources to be released")
+                except Exception as mutex_error:
+                    print(f"Error handling mutex after termination: {str(mutex_error)}")
+
+                return True
+
+            return False
+        except Exception as e:
+            print(f"Error terminating existing instance: {str(e)}")
+            return False
+
     def is_already_running(self):
         """Check if another instance is already running"""
         try:
-            # Try to create and bind a socket to the port
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # First check: Windows mutex (most reliable)
+            if platform.system() == 'Windows' and hasattr(self, 'mutex'):
+                import ctypes
 
-            # Set socket timeout to avoid hanging
-            self.socket.settimeout(1.0)
+                # If we're using a unique mutex name (from force_new), we should be the only one using it
+                if hasattr(self, 'mutex_name') and '_' in self.mutex_name and str(os.getpid()) in self.mutex_name:
+                    print(f"Using unique mutex {self.mutex_name}, skipping mutex existence check")
+                    # Skip mutex check and continue with socket check
+                    pass
+                # If we own the mutex, we're the only instance
+                elif hasattr(self, 'mutex_owned') and self.mutex_owned:
+                    print("We own the mutex, so we're the only instance")
+                    return False
+                # If we don't own the mutex, check if another instance is running
+                elif self.mutex and (not hasattr(self, 'mutex_owned') or not self.mutex_owned):
+                    print("We don't own the mutex, checking if another instance is running")
 
+                    # Verify with process check
+                    if self._is_process_running():
+                        print("Process check confirms another instance is running")
+                        return True
+                    else:
+                        print("Mutex exists but no process found - mutex might be orphaned")
+                        # Try to take ownership of the mutex
+                        try:
+                            if hasattr(self, 'kernel32') and self.mutex:
+                                # Close our current mutex handle
+                                self.kernel32.CloseHandle(self.mutex)
+                                self.mutex = None
+
+                                # Try to create with ownership
+                                self.mutex = self.kernel32.CreateMutexW(None, True, self.mutex_name)
+                                self.last_error = ctypes.GetLastError()
+                                self.mutex_owned = True
+                                print(f"Took ownership of orphaned mutex {self.mutex_name}")
+                                return False
+                        except Exception as e:
+                            print(f"Error taking ownership of mutex: {str(e)}")
+
+                        # Continue with socket check as fallback
+
+            # Second check: Socket binding
             try:
-                self.socket.bind(('127.0.0.1', self.port))
-                self.socket.listen(1)
+                # Try to create and bind a socket to the port
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-                # Start a thread to accept connections from other instances
-                self._start_server_thread()
+                # Set socket timeout to avoid hanging
+                self.socket.settimeout(1.0)
 
-                # If we get here, no other instance is using this port
-                # Create a lock file with our PID
                 try:
-                    with open(self.lock_file, 'w') as f:
-                        f.write(str(os.getpid()))
-                except Exception as e:
-                    print(f"Warning: Could not create lock file: {str(e)}")
+                    self.socket.bind(('127.0.0.1', self.port))
+                    self.socket.listen(1)
 
-                return False
-            except socket.error as e:
-                print(f"Socket binding error: {str(e)}")
-                # Socket is already in use, another instance is running
-                return True
+                    # Start a thread to accept connections from other instances
+                    self._start_server_thread()
+
+                    # If we get here, no other instance is using this port
+                    # Create a lock file with our PID
+                    try:
+                        with open(self.lock_file, 'w') as f:
+                            f.write(str(os.getpid()))
+                    except Exception as e:
+                        print(f"Warning: Could not create lock file: {str(e)}")
+
+                    # Final check: Process verification
+                    if self._is_process_running():
+                        print("Process check indicates another instance is running despite successful socket bind")
+                        # This is a rare case where socket binding succeeded but another instance is running
+                        # Close our socket and return True
+                        if self.socket:
+                            self.socket.close()
+                            self.socket = None
+                        return True
+
+                    # No other instance is running
+                    return False
+
+                except socket.error as e:
+                    print(f"Socket binding error: {str(e)}")
+
+                    # Socket is already in use, but verify the application is actually running
+                    if self._is_process_running():
+                        print("Confirmed another instance is actually running")
+                        return True
+                    else:
+                        print("Socket in use but no matching process found - socket might be orphaned")
+                        # Try to close and reopen the socket
+                        try:
+                            if self.socket:
+                                self.socket.close()
+
+                            # Try again with a new socket
+                            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                            self.socket.settimeout(1.0)
+                            self.socket.bind(('127.0.0.1', self.port))
+                            self.socket.listen(1)
+
+                            # Start a thread to accept connections from other instances
+                            self._start_server_thread()
+
+                            # Create a lock file with our PID
+                            try:
+                                with open(self.lock_file, 'w') as f:
+                                    f.write(str(os.getpid()))
+                            except Exception as e:
+                                print(f"Warning: Could not create lock file: {str(e)}")
+
+                            # Final check: Process verification
+                            if self._is_process_running():
+                                print("Process check indicates another instance is running despite successful socket bind")
+                                # This is a rare case where socket binding succeeded but another instance is running
+                                # Close our socket and return True
+                                if self.socket:
+                                    self.socket.close()
+                                    self.socket = None
+                                return True
+
+                            # No other instance is running
+                            return False
+
+                        except Exception as retry_error:
+                            print(f"Error retrying socket bind: {str(retry_error)}")
+                            # If we still can't bind, assume another instance is running
+                            return True
+
+            except Exception as socket_error:
+                print(f"Error in socket check: {str(socket_error)}")
+                # Fall back to process check
+                return self._is_process_running()
 
         except Exception as e:
             print(f"Error in single instance check: {str(e)}")
@@ -2361,7 +2963,82 @@ class SingleInstanceChecker:
             # This will be called from the server thread
             # We need to use Qt's signal/slot mechanism to safely interact with the UI
             # The actual implementation will be connected from the main thread
-            pass
+
+            # Try to find and activate the window using Windows-specific APIs
+            if platform.system() == 'Windows':
+                try:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+
+                    # Try to find our window by class name or window title
+                    # First try by window title
+                    hwnd = user32.FindWindowW(None, "Auto Organizer")
+
+                    if not hwnd:
+                        # Try by executable name (for frozen app)
+                        if getattr(sys, 'frozen', False):
+                            hwnd = user32.FindWindowW(None, None)
+                            while hwnd:
+                                # Get process ID for this window
+                                pid = ctypes.c_ulong()
+                                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+                                # Check if this window belongs to our process
+                                try:
+                                    import subprocess
+                                    startupinfo = subprocess.STARTUPINFO()
+                                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+                                    # Get process name for this PID
+                                    result = subprocess.run(
+                                        ["tasklist", "/FI", f"PID eq {pid.value}", "/NH", "/FO", "CSV"],
+                                        capture_output=True,
+                                        text=True,
+                                        startupinfo=startupinfo
+                                    )
+
+                                    if "watcher_app.exe" in result.stdout.lower():
+                                        # Found our window
+                                        break
+                                except:
+                                    pass
+
+                                # Try next window
+                                hwnd = user32.FindWindowExW(None, hwnd, None, None)
+
+                    if hwnd:
+                        # Restore the window if it's minimized
+                        if user32.IsIconic(hwnd):
+                            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+
+                        # Bring window to foreground
+                        user32.SetForegroundWindow(hwnd)
+
+                        # Flash window to get user's attention
+                        flash_info = ctypes.Structure()
+                        flash_info._fields_ = [
+                            ("cbSize", ctypes.c_uint),
+                            ("hwnd", ctypes.c_void_p),
+                            ("dwFlags", ctypes.c_uint),
+                            ("uCount", ctypes.c_uint),
+                            ("dwTimeout", ctypes.c_uint)
+                        ]
+
+                        flash_info.cbSize = ctypes.sizeof(flash_info)
+                        flash_info.hwnd = hwnd
+                        flash_info.dwFlags = 3  # FLASHW_ALL
+                        flash_info.uCount = 5
+                        flash_info.dwTimeout = 0
+                        user32.FlashWindowEx(ctypes.byref(flash_info))
+
+                        print("Successfully activated window using Win32 API")
+                        return
+                except Exception as win_error:
+                    print(f"Error using Win32 API to activate window: {str(win_error)}")
+
+            # If we get here, we couldn't activate the window using platform-specific methods
+            # The main application should connect its own handler to this method
+            print("No platform-specific window activation method available")
         except Exception as e:
             print(f"Error activating window: {str(e)}")
 
@@ -2388,11 +3065,78 @@ class SingleInstanceChecker:
         """Clean up resources when the application exits"""
         try:
             self.running = False
+
+            # Close socket
             if self.socket:
-                self.socket.close()
-                self.socket = None
+                try:
+                    self.socket.close()
+                    self.socket = None
+                    print("Socket closed")
+                except Exception as socket_error:
+                    print(f"Error closing socket: {str(socket_error)}")
+
+            # Remove lock file
             if os.path.exists(self.lock_file):
-                os.remove(self.lock_file)
+                try:
+                    os.remove(self.lock_file)
+                    print(f"Lock file removed: {self.lock_file}")
+                except Exception as file_error:
+                    print(f"Error removing lock file: {str(file_error)}")
+
+            # Release mutex
+            if platform.system() == 'Windows' and self.mutex:
+                try:
+                    import ctypes
+
+                    # Use our stored kernel32 reference if available
+                    kernel32 = self.kernel32 if hasattr(self, 'kernel32') else ctypes.windll.kernel32
+
+                    # First release ownership if we have it
+                    if hasattr(self, 'mutex_owned') and self.mutex_owned and hasattr(self, 'mutex_name'):
+                        try:
+                            # Release ownership by creating with ownership=False
+                            temp_mutex = kernel32.CreateMutexW(None, False, self.mutex_name)
+                            if temp_mutex:
+                                kernel32.CloseHandle(temp_mutex)
+                                print(f"Released ownership of mutex: {self.mutex_name}")
+                                self.mutex_owned = False
+                        except Exception as release_error:
+                            print(f"Error releasing mutex ownership: {str(release_error)}")
+
+                    # Now close our handle
+                    if kernel32.CloseHandle(self.mutex):
+                        print(f"Mutex handle closed: {getattr(self, 'mutex_name', 'unknown')}")
+                    else:
+                        error_code = ctypes.GetLastError()
+                        print(f"Failed to close mutex handle: Error {error_code}")
+
+                        # If we failed, try a more aggressive approach
+                        if error_code != 0:
+                            try:
+                                # Try to forcefully close all handles with our mutex name
+                                if hasattr(self, 'mutex_name'):
+                                    # This is a workaround - we create a new mutex with the same name
+                                    # and immediately close it to ensure it's released
+                                    new_mutex = kernel32.CreateMutexW(None, False, self.mutex_name)
+                                    if new_mutex:
+                                        kernel32.CloseHandle(new_mutex)
+                                        print(f"Forcefully released mutex: {self.mutex_name}")
+                            except Exception as force_error:
+                                print(f"Error in forceful mutex release: {str(force_error)}")
+
+                    self.mutex = None
+                    self.mutex_owned = False
+                except Exception as mutex_error:
+                    print(f"Error releasing mutex: {str(mutex_error)}")
+
+            # Additional cleanup for server thread
+            if hasattr(self, 'server_thread') and self.server_thread:
+                try:
+                    self.server_thread.join(timeout=1.0)
+                    print("Server thread joined")
+                except Exception as thread_error:
+                    print(f"Error joining server thread: {str(thread_error)}")
+
         except Exception as e:
             print(f"Error during instance checker cleanup: {str(e)}")
             pass
@@ -2442,43 +3186,154 @@ if __name__ == "__main__":
     # Install the exception hook
     sys.excepthook = exception_hook
 
-    # Check if another instance is already running
-    instance_checker = SingleInstanceChecker("AutoOrganizer")
-    if instance_checker.is_already_running():
-        # Create a minimal QApplication just to show the message box
-        app = QApplication(sys.argv)
-        app.setApplicationName("Auto Organizer")
+    # Check command line arguments for --force-new-instance flag
+    force_new_instance = "--force-new-instance" in sys.argv
 
-        # Try to activate the existing instance
-        activation_successful = instance_checker.activate_existing_instance()
+    # Initialize flags
+    force_continue = False
+    bypass_instance_checking = False
 
-        # Show message box informing the user
-        if activation_successful:
-            message = "Auto Organizer is already running.\n\nThe existing instance has been activated. Please check your taskbar or system tray."
-        else:
-            message = "Auto Organizer is already running.\n\nPlease check your system tray for the running instance."
+    # If --force-new-instance flag is present, skip instance checking completely
+    if force_new_instance:
+        print("Force new instance flag detected - bypassing instance checking")
+        instance_checker = None  # Don't create an instance checker at all
+    else:
+        # Check if another instance is already running
+        instance_checker = SingleInstanceChecker("AutoOrganizer")
 
-        QMessageBox.information(
-            None,
-            "Auto Organizer Already Running",
-            message,
-            QMessageBox.Ok
-        )
+        if instance_checker.is_already_running():
+            # Create a minimal QApplication just to show the message box
+            app = QApplication(sys.argv)
+            app.setApplicationName("Auto Organizer")
 
-        # Exit the application
-        sys.exit(0)
+            # Try to activate the existing instance
+            activation_successful = instance_checker.activate_existing_instance()
+
+            # Show message box informing the user with an "Open Anyway" button
+            if activation_successful:
+                message = "Auto Organizer is already running.\n\nThe existing instance has been activated. Please check your taskbar or system tray."
+            else:
+                message = "Auto Organizer is already running.\n\nPlease check your system tray for the running instance."
+
+            # Create a custom message box with Open Anyway button
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setWindowTitle("Auto Organizer Already Running")
+            msg_box.setText(message)
+
+            # Add buttons
+            open_anyway_button = msg_box.addButton("Open Anyway", QMessageBox.ActionRole)
+            ok_button = msg_box.addButton(QMessageBox.Ok)
+            msg_box.setDefaultButton(ok_button)
+
+            # Show the message box and get the result
+            msg_box.exec_()
+
+            # Check which button was clicked
+            if msg_box.clickedButton() == open_anyway_button:
+                print("User chose to open anyway - terminating existing instance")
+
+                # Instead of trying to terminate and continue, restart the application with --force-new-instance flag
+                try:
+                    # Get the current executable path
+                    if getattr(sys, 'frozen', False):
+                        # We're running in a bundle
+                        executable = sys.executable
+                    else:
+                        # We're running in a normal Python environment
+                        executable = sys.executable
+
+                    # Build the command line
+                    script_path = os.path.abspath(sys.argv[0])
+                    args = [arg for arg in sys.argv[1:] if arg != "--force-new-instance"]  # Remove if already present
+                    args.append("--force-new-instance")  # Add our flag
+
+                    # Print the command we're about to execute
+                    cmd = [executable, script_path] + args
+                    print(f"Restarting with command: {' '.join(cmd)}")
+
+                    # Start the new process
+                    if platform.system() == 'Windows':
+                        # Use subprocess.Popen to avoid blocking
+                        import subprocess
+                        subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+                    else:
+                        # For non-Windows platforms
+                        os.execv(executable, [executable, script_path] + args)
+
+                    # Exit this instance
+                    print("Exiting current instance")
+                    sys.exit(0)
+
+                except Exception as restart_error:
+                    print(f"Error restarting application: {str(restart_error)}")
+                    # Show error message
+                    QMessageBox.critical(
+                        None,
+                        "Error",
+                        f"Failed to restart the application: {str(restart_error)}",
+                        QMessageBox.Ok
+                    )
+                    sys.exit(1)
+            else:
+                # User clicked OK, exit the application
+                sys.exit(0)
+
+    # If we're here, either no other instance was running, or we chose to force continue
+    # We don't need an else clause here - this code will run if the if condition above was false
 
     try:
-        # Create application
-        app = QApplication(sys.argv)
+        # Create application if it doesn't already exist
+        # (it might exist if we're continuing after terminating an existing instance)
+        if 'app' not in locals() or app is None or not isinstance(app, QApplication):
+            app = QApplication(sys.argv)
 
         # Set application metadata
         app.setApplicationName("Auto Organizer")
         app.setApplicationVersion(load_version(os.path.join(os.path.dirname(__file__), "version.txt")))
         app.setOrganizationName("Eyad Elshaer")
 
-        # Create the instance checker for the main instance
-        instance_checker = SingleInstanceChecker("AutoOrganizer")
+        # Create the instance checker for the main instance if needed
+        # If we're using --force-new-instance, instance_checker will be None
+        if instance_checker is None:
+            print("Running with --force-new-instance flag - no instance checking")
+            # Create a dummy instance checker for compatibility with the rest of the code
+            class DummyInstanceChecker:
+                def __init__(self):
+                    self.app_name = "AutoOrganizer_Dummy"
+                    self.mutex = None
+                    self.socket = None
+                    self.lock_file = None
+                    self.server_thread = None
+                    self.running = True
+                    print("Created dummy instance checker for --force-new-instance mode")
+
+                def is_already_running(self):
+                    return False
+
+                def activate_existing_instance(self):
+                    return False
+
+                def terminate_existing_instance(self):
+                    return True
+
+                def cleanup(self):
+                    pass
+
+                def _activate_window(self):
+                    pass
+
+                def _start_server_thread(self):
+                    pass
+
+            instance_checker = DummyInstanceChecker()
+        elif not force_continue:
+            # Normal flow - create a new instance checker
+            instance_checker = SingleInstanceChecker("AutoOrganizer")
+        else:
+            # If we're continuing after terminating an existing instance
+            # (this branch shouldn't be reached with our new approach, but kept for compatibility)
+            print("Using existing instance checker from force_continue flow")
 
         # Create main window and pass the instance checker
         window = WatcherApp(instance_checker)
