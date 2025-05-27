@@ -161,6 +161,39 @@ class SettingsTab(BaseTab):
         theme_container.addStretch()
         g_layout.addLayout(theme_container)
 
+        # Max File Age setting
+        max_age_container = QHBoxLayout()
+        max_age_label = QLabel("Only Process Files Modified in Last X Hours:")
+        max_age_label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                font-weight: bold;
+                padding: 5px;
+            }
+        """)
+        self.max_file_age_spinbox = QSpinBox()
+        self.max_file_age_spinbox.setToolTip("Set the maximum age in hours for files to be processed. 0 means no limit.")
+        self.max_file_age_spinbox.setRange(0, 8760) # 0 to 1 year in hours
+        self.max_file_age_spinbox.setValue(48) # Default UI value
+        self.max_file_age_spinbox.setSuffix(" hours")
+        self.max_file_age_spinbox.setStyleSheet("""
+            QSpinBox {
+                font-size: 13px;
+                padding: 5px;
+                border: 1px solid #c0c0c0;
+                border-radius: 4px;
+                min-width: 80px;
+            }
+        """)
+        if self.parent_window: # Connect only if parent_window exists
+            self.max_file_age_spinbox.valueChanged.connect(lambda value: self.on_spinbox_changed(self.max_file_age_spinbox, value))
+
+
+        max_age_container.addWidget(max_age_label)
+        max_age_container.addWidget(self.max_file_age_spinbox)
+        max_age_container.addStretch()
+        g_layout.addLayout(max_age_container)
+
         group.setLayout(g_layout)
         self.main_layout.addWidget(group)
 
@@ -202,6 +235,7 @@ class SettingsTab(BaseTab):
         config["auto_update_check"] = self.auto_update_chk.isChecked()
         config["show_notifications"] = self.notifications_chk.isChecked()
         config["theme"] = self.theme_combo.currentText()
+        config["max_file_age_hours"] = self.max_file_age_spinbox.value()
 
     def set_dark_mode(self, is_dark):
         """Set dark mode and update styling"""
@@ -405,6 +439,8 @@ class SettingsTab(BaseTab):
                     self.exit_on_close_chk.stateChanged.disconnect(self.parent_window.auto_save_settings)
                     self.auto_update_chk.stateChanged.disconnect(self.parent_window.auto_save_settings)
                     self.notifications_chk.stateChanged.disconnect(self.parent_window.auto_save_settings)
+            if hasattr(self, 'max_file_age_spinbox'):
+                self.max_file_age_spinbox.valueChanged.disconnect(self.parent_window.auto_save_settings)
                 except TypeError:
                     # Signals might not be connected
                     pass
@@ -415,6 +451,7 @@ class SettingsTab(BaseTab):
             self.exit_on_close_chk.setChecked(config.get("exit_on_close", False))
             self.auto_update_chk.setChecked(config.get("auto_update_check", True))
             self.notifications_chk.setChecked(config.get("show_notifications", True))
+            self.max_file_age_spinbox.setValue(config.get("max_file_age_hours", 48)) # Default to 48
 
             current_theme = config.get("theme", "System Default").lower()
             theme_index = {
@@ -431,6 +468,21 @@ class SettingsTab(BaseTab):
                 self.exit_on_close_chk.stateChanged.connect(lambda state: self.on_checkbox_changed(self.exit_on_close_chk, state))
                 self.auto_update_chk.stateChanged.connect(lambda state: self.on_checkbox_changed(self.auto_update_chk, state))
                 self.notifications_chk.stateChanged.connect(lambda state: self.on_checkbox_changed(self.notifications_chk, state))
+                if hasattr(self, 'max_file_age_spinbox'): # Check if spinbox exists before connecting
+                    self.max_file_age_spinbox.valueChanged.connect(lambda value: self.on_spinbox_changed(self.max_file_age_spinbox, value))
         finally:
             # Restore initializing flag
             self.is_initializing = old_initializing
+
+    def on_spinbox_changed(self, spinbox, value):
+        """Handle QSpinBox value changes and trigger auto-save"""
+        if not self.is_initializing and self.parent_window:
+            spinbox_name = ""
+            if spinbox == self.max_file_age_spinbox:
+                spinbox_name = "Max File Age"
+            
+            # Trigger auto-save
+            self.parent_window.auto_save_settings()
+
+            # Show status message
+            self.parent_window.statusBar().showMessage(f"{spinbox_name} set to {value} hours", 3000)

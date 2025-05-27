@@ -29,6 +29,27 @@ for site_path in site.getsitepackages():
 
 # Try importing watchdog with detailed error reporting and better fallback
 USE_WATCHDOG = False  # Set default to False
+
+# It's already imported, but good to ensure:
+# import os 
+# import time
+
+def is_file_recent(file_path, max_age_hours):
+    """Checks if a file is recent based on its modification time."""
+    try:
+        # Ensure max_age_hours is positive
+        if max_age_hours <= 0:
+            return True # No age limit
+
+        mtime = os.path.getmtime(file_path)
+        file_age_seconds = time.time() - mtime
+        file_age_hours = file_age_seconds / 3600
+        return file_age_hours <= max_age_hours
+    except FileNotFoundError:
+        return False
+    except Exception as e: # Catch other potential errors like permission issues
+        print(f"Error checking file age for {file_path}: {e}")
+        return False
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
@@ -245,9 +266,10 @@ class FileProcessorWorker(QObject):
                             src = os.path.join(watch, item)
                             if not os.path.exists(src):
                                 continue
-                            mtime = os.path.getmtime(src)
-                            # Only include files modified today
-                            if mtime >= today_start:
+                            
+                            # Use is_file_recent for stricter filtering
+                            if is_file_recent(src, self.max_file_age_hours):
+                                mtime = os.path.getmtime(src) # Get mtime only if recent
                                 items_with_time.append((mtime, item, src))
                         except Exception:
                             continue
@@ -616,12 +638,13 @@ if USE_WATCHDOG:
     class FileWatcher(FileSystemEventHandler):
         """Watches for file system changes and processes files immediately"""
 
-        def __init__(self, watch_dir, target_dir, file_queue, logging_signal):
+        def __init__(self, watch_dir, target_dir, file_queue, logging_signal, max_file_age_hours):
             super().__init__()  # Add super() call to properly initialize FileSystemEventHandler
             self.watch_dir = watch_dir
             self.target_dir = target_dir
             self.file_queue = file_queue
             self.logging_signal = logging_signal
+            self.max_file_age_hours = max_file_age_hours # Store max_file_age_hours
             self.observer = Observer()
             self.observer.schedule(self, watch_dir, recursive=False)
             self.processed_files = set()  # Track processed files to avoid duplicates
@@ -699,11 +722,13 @@ if USE_WATCHDOG:
                 if len(self.processed_files) > 1000:
                     self.processed_files.clear()
 
-                # Queue the file for processing
+                # Queue the file for processing only if it's recent
                 if os.path.exists(file_path):  # Double check file still exists
-                    self.logging_signal.emit(f"Detected new file: {filename}", None, None)
-                    self.file_queue.put((filename, file_path, self.watch_dir, self.target_dir, None))
-
+                    if is_file_recent(file_path, self.max_file_age_hours):
+                        self.logging_signal.emit(f"Detected recent file: {filename}", None, None)
+                        self.file_queue.put((filename, file_path, self.watch_dir, self.target_dir, None))
+                    else:
+                        self.logging_signal.emit(f"Skipping old file (watchdog): {filename}", None, None)
             except Exception as e:
                 self.logging_signal.emit(f"Error processing file {file_path}: {str(e)}", None, None)
 
@@ -718,10 +743,11 @@ if USE_WATCHDOG:
 class WatcherManager:
     """Manages file watching using either watchdog or polling"""
 
-    def __init__(self, file_queue, logging_signal):
+    def __init__(self, file_queue, logging_signal, main_app_ref):
         self.watchers = []
         self.file_queue = file_queue
         self.logging_signal = logging_signal
+        self.main_app_ref = main_app_ref # Store main_app_ref
         self.use_watchdog = USE_WATCHDOG
         self.polling_timer = None if USE_WATCHDOG else QTimer()
         self.watch_pairs = []
@@ -740,7 +766,8 @@ class WatcherManager:
             # Create new watchers for each pair
             for watch_dir, target_dir in watch_pairs:
                 if watch_dir and target_dir:
-                    watcher = FileWatcher(watch_dir, target_dir, self.file_queue, self.logging_signal)
+                    max_age_hours = self.main_app_ref.config.get("max_file_age_hours", 24)
+                    watcher = FileWatcher(watch_dir, target_dir, self.file_queue, self.logging_signal, max_age_hours)
                     watcher.start()
                     self.watchers.append(watcher)
         else:
@@ -775,9 +802,13 @@ class WatcherManager:
                         except:
                             continue
 
-                        # Queue the file for processing
-                        self.file_queue.put((filename, file_path, watch_dir, target_dir, None))
-
+                        # Queue the file for processing only if it's recent
+                        max_age_hours = self.main_app_ref.config.get("max_file_age_hours", 24)
+                        if is_file_recent(file_path, max_age_hours):
+                            self.file_queue.put((filename, file_path, watch_dir, target_dir, None))
+                        else:
+                            if self.main_app_ref.config.get("verbose_logging", False):
+                                self.logging_signal.emit(f"Skipping old file (polling): {filename}", None, None)
                 except Exception as e:
                     self.logging_signal.emit(f"Error polling directory {watch_dir}: {str(e)}", None, None)
 
@@ -874,7 +905,7 @@ class WatcherApp(QMainWindow):
         self.file_processor.finished.connect(self.worker_thread.quit)
 
         # Initialize watcher manager before any potential usage
-        self.watcher_manager = WatcherManager(self.file_queue, self.logging_signal)
+        self.watcher_manager = WatcherManager(self.file_queue, self.logging_signal, self) # Pass self (main_app_ref)
 
         # Initialize tabs and UI
         self.init_tabs()
@@ -1898,7 +1929,7 @@ class WatcherApp(QMainWindow):
             self.config.setdefault("start_on_launch", False)
             self.config.setdefault("verbose_logging", False)
             self.config.setdefault("process_directories", True)
-            self.config.setdefault("max_file_age_hours", 24)
+            self.config.setdefault("max_file_age_hours", 48) # Updated default to 48
             self.config.setdefault("auto_watch", True)
 
             # Save config to ensure all defaults are written
